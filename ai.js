@@ -1,3 +1,4 @@
+if(!Array.prototype.at)Array.prototype.at=function(index){index=Math.trunc(index)||0;if(index<0)index+=this.length;return this[index];};
 import {evaluate,rank,suit,secureRandom} from './evaluator.js';
 import {seededRandom,tableMood} from './personality.js';
 import {BET_UNIT,snapBet} from './bet.js';

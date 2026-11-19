@@ -3,6 +3,10 @@ import {BET_UNIT,snapBet} from './bet.js';
 import {EMOTES,EMOTE_COOLDOWN_MS} from './emotes.js';
 import {SUITS,RANKS,suit,cardText} from './evaluator.js';
 const $=s=>document.querySelector(s),fmt=n=>Math.round(n).toLocaleString('en-US');
+const cloneDeep=value=>typeof structuredClone==='function'?structuredClone(value):JSON.parse(JSON.stringify(value));
+const hasOwn=(object,key)=>Object.prototype.hasOwnProperty.call(object,key);
+const timeoutSignal=ms=>{if(typeof AbortSignal!=='undefined'&&typeof AbortSignal.timeout==='function')return AbortSignal.timeout(ms);const controller=new AbortController();setTimeout(()=>controller.abort(),ms);return controller.signal;};
+if(!Array.prototype.at)Array.prototype.at=function(index){index=Math.trunc(index)||0;if(index<0)index+=this.length;return this[index];};
 const levelLabels={easy:'入门',normal:'标准',hard:'高手'};
 const prefs={sound:true,volume:.45,speed:1,autoNext:false,assist:false,seatCount:DEFAULT_SEATS,aiLevel:DEFAULT_AI_LEVEL,turnSeconds:30,allInMusic:'kpl',nickname:''};
 const ALL_IN_TRACKS={default:{src:'allin.mp3',label:'原版全下曲'},kpl:{src:'allin-kpl.m4a',label:'我的音乐 · 巅峰对决片段'}};
@@ -763,7 +767,7 @@ function openLeaderboard(tab='win'){
  const render=()=>{list.innerHTML=lbRows(tab);bindLbRows();};
  document.querySelectorAll('[data-lb-tab]').forEach(button=>button.onclick=()=>{tab=button.dataset.lbTab;document.querySelectorAll('[data-lb-tab]').forEach(item=>item.classList.toggle('selected',item===button));render();});
  if(leaderboardCache)render();
- fetch('/api/leaderboard',{signal:AbortSignal.timeout?.(12000)}).then(response=>{if(!response.ok)throw Error('联机服务暂时不可用');return response.json();}).then(data=>{leaderboardCache={wins:data.wins||[],hands:data.hands||[]};render();}).catch(error=>{if(!leaderboardCache)list.innerHTML=`<p class="lb-empty">${lbEscape(error.message||'排行榜暂时不可用')}</p>`;});
+ fetch('/api/leaderboard',{signal:timeoutSignal(12000)}).then(response=>{if(!response.ok)throw Error('联机服务暂时不可用');return response.json();}).then(data=>{leaderboardCache={wins:data.wins||[],hands:data.hands||[]};render();}).catch(error=>{if(!leaderboardCache)list.innerHTML=`<p class="lb-empty">${lbEscape(error.message||'排行榜暂时不可用')}</p>`;});
 }
 function openLbDetail(kind,index){
  const entry=(kind==='win'?leaderboardCache?.wins:leaderboardCache?.hands)?.[index];if(!entry)return;
@@ -863,7 +867,7 @@ function initialize(){
  const dialog=document.getElementById('modal');
  $('#seatCount').value=Number.isInteger(prefs.seatCount)&&prefs.seatCount>=MIN_SEATS&&prefs.seatCount<=MAX_SEATS?prefs.seatCount:DEFAULT_SEATS;
  $('#turnSeconds').value=TURN_VALUES.includes(Number(prefs.turnSeconds))?String(prefs.turnSeconds):'30';
- $('#aiLevel').value=Object.hasOwn(levelLabels,prefs.aiLevel)?prefs.aiLevel:DEFAULT_AI_LEVEL;
+ $('#aiLevel').value=hasOwn(levelLabels,prefs.aiLevel)?prefs.aiLevel:DEFAULT_AI_LEVEL;
  $('#startAssist').checked=!!prefs.assist;
  $('#startAssist').onchange=rememberSetup;
  $('#seatCount').onchange=rememberSetup;$('#aiLevel').onchange=rememberSetup;$('#turnSeconds').onchange=rememberSetup;
@@ -945,7 +949,7 @@ function applyRoom(state){
  if(!changed){setText($('#modeLabel'),roomTitle(online));return;}
  const last=game.events.at(-1),newEvent=state.events.at(-1),newHand=state.sessionId!==game.sessionId||state.hand!==game.hand;
  if(newHand){reviewViews=[];previousActor=null;previousStreet=null;previousHand=0;}
- game=Object.assign(Object.create(Game.prototype),state,{aiLevel:online.aiLevel});game.legal=(id=game.actor)=>id===0?state.actionOptions:null;game.publicView=()=>structuredClone(state.reviewView);
+ game=Object.assign(Object.create(Game.prototype),state,{aiLevel:online.aiLevel});game.legal=(id=game.actor)=>id===0?state.actionOptions:null;game.publicView=()=>cloneDeep(state.reviewView);
  turnDeadline=state.actor===0&&state.phase==='playing'?Date.now()+Math.max(0,state.turnRemaining||0):0;
  let pendingEmote=null;
  if(newEvent&&JSON.stringify(last)!==JSON.stringify(newEvent)&&newEvent.kind==='emote'){pendingEmote=newEvent;sound('tap');}
@@ -958,7 +962,7 @@ function applyRoom(state){
  if(pendingEmote){showEmote(pendingEmote.seat,pendingEmote);pendingEmote=null;}if(state.phase==='complete'&&changed)sound(state.result.heroDelta>0?'win':'tap');
 }
 async function roomRequest(path,body,token=online?.token){
- const response=await fetch('/api/rooms'+path,{method:body?'POST':'GET',headers:{...(body?{'Content-Type':'application/json'}:{}),...(token?{Authorization:'Bearer '+token}:{})},...(body?{body:JSON.stringify(body)}:{}),signal:AbortSignal.timeout(12000)});
+ const response=await fetch('/api/rooms'+path,{method:body?'POST':'GET',headers:{...(body?{'Content-Type':'application/json'}:{}),...(token?{Authorization:'Bearer '+token}:{})},...(body?{body:JSON.stringify(body)}:{}),signal:timeoutSignal(12000)});
  let data;try{data=await response.json();}catch{throw Error('房间服务暂时不可用');}if(!response.ok)throw Object.assign(Error(data.error||'连接失败'),{status:response.status,retry:!!data.retry});return data;
 }
 function setReconnectState(active, text='连接中断 · 正在重连…'){
@@ -1042,7 +1046,7 @@ async function bestInviteOrigin(){
  const privateHost=/^(?:localhost|127\.|10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.|\[?::1\]?)$/i.test(host)||/^(?:localhost|127\.|10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/i.test(host);
  if(host&&!privateHost)return location.origin.replace(/\/$/,'');
  try{
-  const r=await fetch('/api/server-info',{cache:'no-store',signal:AbortSignal.timeout(3000)});
+  const r=await fetch('/api/server-info',{cache:'no-store',signal:timeoutSignal(3000)});
   if(r.ok){const info=await r.json();if(info.publicOrigin)return String(info.publicOrigin).replace(/\/$/,'');if(Array.isArray(info.urls)&&info.urls[0])return String(info.urls[0]).replace(/\/$/,'');}
  }catch{}
  return location.origin.replace(/\/$/,'');

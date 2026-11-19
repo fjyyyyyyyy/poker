@@ -2,6 +2,8 @@ import { evaluate, shuffledDeck, secureRandom } from './evaluator.js';
 import {pickNames} from './names.js';
 import {newPersonality} from './personality.js';
 import {BET_UNIT,ceilBet,isBet} from './bet.js';
+const cloneDeep=value=>typeof structuredClone==='function'?structuredClone(value):JSON.parse(JSON.stringify(value));
+if(!Array.prototype.at)Array.prototype.at=function(index){index=Math.trunc(index)||0;if(index<0)index+=this.length;return this[index];};
 export const STREETS=['preflop','flop','turn','river'];
 export const STREET_NAMES={preflop:'翻牌前',flop:'翻牌',turn:'转牌',river:'河牌'};
 export const MIN_SEATS=2,DEFAULT_SEATS=6,MAX_SEATS=10;
@@ -164,13 +166,13 @@ export class Game {
   this.players.forEach(p=>p.net=(p.net||0)+p.stack-p.startStack);
   this.completedHands++;this.net+=this.result.heroDelta;
   this.phase='complete';this.actor=null;
-  this.history.unshift({hand:this.hand,board:[...this.board],heroCards:[...this.players[0].hole],privateHands:this.players.map(p=>[...p.hole]),deltas:this.players.map(p=>p.stack-p.startStack),names:this.players.map(p=>p.name),events:structuredClone(this.events),result:structuredClone(this.result),stacks:this.players.map(p=>p.stack)});this.history=this.history.slice(0,100);
+  this.history.unshift({hand:this.hand,board:[...this.board],heroCards:[...this.players[0].hole],privateHands:this.players.map(p=>[...p.hole]),deltas:this.players.map(p=>p.stack-p.startStack),names:this.players.map(p=>p.name),events:cloneDeep(this.events),result:cloneDeep(this.result),stacks:this.players.map(p=>p.stack)});this.history=this.history.slice(0,100);
   // 高于 3,500 的部分自动还债（真人/AI 都适用）
   this.forceRepay();
  }
  publicView(id){
   // Deliberate allowlist: never serialize deck, opponent hole cards, burns, or private decisions.
-  return {sessionId:this.sessionId,hand:this.hand,seat:id,aiLevel:this.aiLevel,personality:structuredClone(this.personalities[id]),hole:[...this.players[id].hole],board:[...this.board],street:this.street,button:this.button,sbSeat:this.sbSeat,bbSeat:this.bbSeat,sb:this.sb,bb:this.bb,betUnit:this.betUnit,pot:this.pot,currentBet:this.currentBet,minRaise:this.minRaise,legal:this.legal(id),players:this.players.map(p=>({id:p.id,name:p.name,isHuman:!!p.isHuman,stack:p.stack,bet:p.bet,total:p.total,folded:p.folded,stats:{...p.stats}})),events:structuredClone(this.events)};
+  return {sessionId:this.sessionId,hand:this.hand,seat:id,aiLevel:this.aiLevel,personality:cloneDeep(this.personalities[id]),hole:[...this.players[id].hole],board:[...this.board],street:this.street,button:this.button,sbSeat:this.sbSeat,bbSeat:this.bbSeat,sb:this.sb,bb:this.bb,betUnit:this.betUnit,pot:this.pot,currentBet:this.currentBet,minRaise:this.minRaise,legal:this.legal(id),players:this.players.map(p=>({id:p.id,name:p.name,isHuman:!!p.isHuman,stack:p.stack,bet:p.bet,total:p.total,folded:p.folded,stats:{...p.stats}})),events:cloneDeep(this.events)};
  }
  borrow(id){
   const p=this.players[id];if(!p)throw Error('玩家不存在');
