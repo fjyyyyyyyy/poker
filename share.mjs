@@ -2,8 +2,8 @@
 /**
  * 一键公网联机助手
  *
- *   npm run share              # 启动并打印公网地址
- *   npm run share -- --open    # 启动、申请地址并自动打开浏览器
+ *   npm run share              # 启动、申请地址并自动打开建房页
+ *   npm run share -- --no-open # 只启动并打印公网地址
  *
  * 做三件事：
  *   1. 如果本机 8787 端口还没有游戏服务，先帮你启动 server.mjs
@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 8787;
-const OPEN = process.argv.includes('--open');
+const OPEN = !process.argv.includes('--no-open');
 const LOCAL = `http://127.0.0.1:${PORT}`;
 const INFO = `${LOCAL}/api/server-info`;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -224,15 +224,14 @@ async function main() {
     console.log('  公网地址：' + match[0]);
     console.log('  ────────────────────────────────────────────');
     console.log('');
-    if (OPEN) console.log('  已自动用默认浏览器打开这个地址。');
-    console.log('  1. 用上面这个地址进入游戏（不要用 127.0.0.1，否则邀请链接会是内网地址）');
-    console.log('  2. 选择「联机牌桌 → 创建房间」，再点顶栏「房间」→「复制邀请」');
-    console.log('  3. 把邀请链接发给朋友，他们在外网也能直接加入');
+    if (OPEN) console.log('  正在自动打开建房页；若没有打开，请手动访问：' + match[0] + '/#host=1');
+    else console.log('  打开下面地址建房：' + match[0] + '/#host=1');
+    console.log('  建房后点「房间」即可看到二维码；手机扫码，或把邀请链接发给朋友即可加入。');
     console.log('');
     console.log('  这个窗口需要一直开着；关闭、休眠或断网后链接失效。');
     console.log('  想给朋友一个固定地址，请部署到云服务器（见 README）。');
     console.log('');
-    if (OPEN) openWhenReady(match[0]).catch(() => {});
+    if (OPEN) openWhenReady(match[0] + '/#host=1').catch(() => {});
   };
   tunnelChild.stdout.on('data', collect);
   tunnelChild.stderr.on('data', collect);

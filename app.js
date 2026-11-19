@@ -4,7 +4,7 @@ import {EMOTES,EMOTE_COOLDOWN_MS} from './emotes.js';
 import {SUITS,RANKS,suit,cardText} from './evaluator.js';
 const $=s=>document.querySelector(s),fmt=n=>Math.round(n).toLocaleString('en-US');
 const levelLabels={easy:'入门',normal:'标准',hard:'高手'};
-const prefs={sound:true,volume:.45,speed:1,autoNext:false,assist:false,seatCount:DEFAULT_SEATS,aiLevel:DEFAULT_AI_LEVEL,turnSeconds:30,allInMusic:'kpl'};
+const prefs={sound:true,volume:.45,speed:1,autoNext:false,assist:false,seatCount:DEFAULT_SEATS,aiLevel:DEFAULT_AI_LEVEL,turnSeconds:30,allInMusic:'kpl',nickname:''};
 const ALL_IN_TRACKS={default:{src:'allin.mp3',label:'原版全下曲'},kpl:{src:'allin-kpl.m4a',label:'我的音乐 · 巅峰对决片段'}};
 const TURN_VALUES=[15,30,45,60,120,300];
 function turnLabel(ms){const s=Math.max(1,Math.round(ms/1000));return s>=60?`${Math.round(s/60)} 分钟`:`${s} 秒`;}
@@ -1055,6 +1055,34 @@ function invitedSeat(){
  const seat=Number(params.get('seat'));
  return Number.isInteger(seat)&&seat>=0?seat:null;
 }
+function invitedHost(){
+ return new URLSearchParams(location.hash.slice(1)).get('host')==='1';
+}
+let qrLoader=null;
+function ensureQrLib(){
+ if(window.qrcode)return Promise.resolve(window.qrcode);
+ if(!qrLoader)qrLoader=new Promise((resolve,reject)=>{
+  const script=document.createElement('script');
+  script.src='qrcode.js';script.async=true;
+  script.onload=()=>window.qrcode?resolve(window.qrcode):reject(Error('二维码组件加载失败'));
+  script.onerror=()=>reject(Error('二维码组件加载失败'));
+  document.head.append(script);
+ });
+ return qrLoader;
+}
+async function renderInviteQr(text){
+ const box=$('#inviteQr');if(!box)return;
+ box.innerHTML='<span class="qr-placeholder">二维码加载中…</span>';
+ try{
+  const qr=await ensureQrLib();
+  if(!document.body.contains(box))return;
+  const code=qr(0,'M');code.addData(text);code.make();
+  box.innerHTML=code.createSvgTag({cellSize:4,margin:2,scalable:true,alt:'扫码加入房间'});
+ }catch{
+  if(document.body.contains(box))box.innerHTML='<span class="qr-placeholder">二维码加载失败，请复制邀请链接</span>';
+ }
+}
+function escapeNickname(value){return String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));}
 async function copyText(value){
  try{await navigator.clipboard.writeText(value);toast('链接已复制');}
  catch{toast('复制失败，请手动选择链接');}
@@ -1072,9 +1100,11 @@ function openMultiplayer(mode='join'){
    if(player.id===0)return `<div class="host-seat-row"><span>${player.id+1} 号 · ${lbEscape(player.name)}</span><span>你 · 房主</span></div>`;
    return `<div class="host-seat-row"><span>${player.id+1} 号 · ${lbEscape(player.name)}</span><span class="host-seat-actions">${human?`<button type="button" class="text-button" data-kick-seat="${player.id}">踢出 → AI</button>`:`<button type="button" class="text-button" data-fill-seat="${player.id}">补/重置 AI</button><button type="button" class="text-button" data-seat-invite="${player.id}">换真人</button>`}</span></div>`;
   }).join('')}<p class="session-note">踢出真人后该座位由 AI 接管；「换真人」会复制该 AI 座位的邀请链接，朋友打开后接替 AI 并以 2,000 买入。「补/重置 AI」把该 AI 恢复为 2,000 筹码。</p></div>`:'';
-  openModal('房间',`<div class="room-code">${online.code}</div><p id="roomMeta">${roomLine()}${online.host?' · 房主':''}${online.spectator?' · 观战':''}</p><div class="ledger-actions"><button id="copyInvite" class="action-button primary">复制邀请</button>${online.spectator||online.away?'':`<button id="awayRoom" class="action-button">暂时离开</button>`}<button id="leaveRoom" class="action-button">${online.spectator?'离开观战':'彻底退出'}</button></div><p class="session-note">${online.spectator?'观战不占座，随时可以离开。':online.away?'当前座位由 AI 代打，点行动栏的「重新接管」可拿回；也可以彻底退出。':'暂时离开：座位交给 AI，保留重连凭证，可从首页「回到房间」或重新打开页面继续。</br>彻底退出：座位释放给 AI/其他玩家，凭证清除。'}</p><label class="field-label" for="inviteLink">邀请链接</label><input id="inviteLink" class="room-input" readonly>${hostPanel}`);
+  openModal('房间',`<div class="room-code">${online.code}</div><p id="roomMeta">${roomLine()}${online.host?' · 房主':''}${online.spectator?' · 观战':''}</p><div class="ledger-actions"><button id="copyInvite" class="action-button primary">复制邀请</button><button id="shareInvite" class="action-button">分享邀请</button>${online.spectator||online.away?'':`<button id="awayRoom" class="action-button">暂时离开</button>`}<button id="leaveRoom" class="action-button">${online.spectator?'离开观战':'彻底退出'}</button></div><p class="session-note">${online.spectator?'观战不占座，随时可以离开。':online.away?'当前座位由 AI 代打，点行动栏的「重新接管」可拿回；也可以彻底退出。':'暂时离开：座位交给 AI，保留重连凭证，可从首页「回到房间」或重新打开页面继续。</br>彻底退出：座位释放给 AI/其他玩家，凭证清除。'}</p><label class="field-label" for="inviteLink">邀请链接</label><input id="inviteLink" class="room-input" readonly><div class="invite-qr-block"><div id="inviteQr" class="invite-qr" aria-live="polite"></div><small>手机扫码直接加入</small></div>${hostPanel}`);
   $('#inviteLink').value=invite;
   $('#copyInvite').onclick=async()=>{const input=$('#inviteLink');try{if(!navigator.clipboard?.writeText)throw Error('clipboard unavailable');await navigator.clipboard.writeText(input.value);}catch{input.focus();input.select();input.setSelectionRange?.(0,input.value.length);try{if(!document.execCommand('copy'))throw Error('copy failed');}catch{toast('请按 Ctrl/⌘+C 复制选中的链接');return;}}toast('邀请链接已复制');};
+  $('#shareInvite').onclick=async()=>{try{if(navigator.share){await navigator.share({title:'River Room 牌桌',text:'来一起打牌',url:invite});return;}}catch{}copyText(invite);};
+  renderInviteQr(invite);
   $('#awayRoom')?.addEventListener('click',async()=>{if(await roomOp('away'))exitRoom(true);});
  $('#leaveRoom').onclick=async()=>{if(await roomOp('leave'))exitRoom();};
   document.querySelectorAll('[data-kick-seat]').forEach(button=>button.onclick=async()=>{
@@ -1091,7 +1121,7 @@ function openMultiplayer(mode='join'){
   return;
  }
  const join=mode==='join',options=setupOptions(),title=join?'加入房间':'创建房间',savedSession=readSession();
- openModal(title,`<form id="roomForm">${join&&savedSession?`<p class="session-note">上次的房间：<strong>${savedSession.code}</strong> <button type="button" class="small-link" id="resumeSavedRoom">重新接管上一局</button></p>`:''}${join?'':`<p class="session-note">${options.seatCount} 人桌 · ${levelLabels[options.aiLevel]} AI · 回合 ${turnLabel(options.turnSeconds*1000)}</p>`}<label class="field-label" for="playerNickname">昵称</label><input id="playerNickname" class="room-input" name="nickname" maxlength="12" autocomplete="nickname" required>${join?`<label class="field-label" for="roomCodeInput">房间码</label><input id="roomCodeInput" class="room-input" name="code" maxlength="8" autocapitalize="characters" spellcheck="false" value="${invitedRoom()}" required><div class="seat-pick" id="seatPick" hidden><div class="seat-pick-head">选择要接替的 AI 座位<small>新人固定重新买入 2,000</small></div><div id="seatPickList" class="seat-pick-list"></div></div><label class="spectate-check"><input type="checkbox" id="joinSpectate"> 只观战，不占座位</label>`:''}<p id="roomError" role="alert"></p><button class="action-button primary modal-action" id="roomSubmit">${title}</button></form>`);
+ openModal(title,`<form id="roomForm">${join&&savedSession?`<p class="session-note">上次的房间：<strong>${savedSession.code}</strong> <button type="button" class="small-link" id="resumeSavedRoom">重新接管上一局</button></p>`:''}${join?'':`<p class="session-note">${options.seatCount} 人桌 · ${levelLabels[options.aiLevel]} AI · 回合 ${turnLabel(options.turnSeconds*1000)}</p>`}<label class="field-label" for="playerNickname">昵称</label><input id="playerNickname" class="room-input" name="nickname" maxlength="12" autocomplete="nickname" value="${escapeNickname(prefs.nickname||'')}" required>${join?`<label class="field-label" for="roomCodeInput">房间码</label><input id="roomCodeInput" class="room-input" name="code" maxlength="8" autocapitalize="characters" spellcheck="false" value="${invitedRoom()}" required><div class="seat-pick" id="seatPick" hidden><div class="seat-pick-head">选择要接替的 AI 座位<small>新人固定重新买入 2,000</small></div><div id="seatPickList" class="seat-pick-list"></div></div><label class="spectate-check"><input type="checkbox" id="joinSpectate"> 只观战，不占座位</label>`:''}<p id="roomError" role="alert"></p><button class="action-button primary modal-action" id="roomSubmit">${title}</button></form>`);
  const form=$('#roomForm');
  $('#resumeSavedRoom')?.addEventListener('click',()=>{closeModal();restoreSavedSession();});
  let joinSeat=invitedSeat();
@@ -1132,6 +1162,7 @@ function openMultiplayer(mode='join'){
   event.preventDefault();if(connecting)return;
   const button=$('#roomSubmit'),error=$('#roomError'),name=cleanNickname($('#playerNickname').value);
   const code=join?$('#roomCodeInput').value.trim().toUpperCase():'';
+  if(name){prefs.nickname=name;savePrefs();}
   if(join&&!/^[A-Z2-9]{8}$/.test(code)){error.textContent='请输入 8 位房间码';return;}
   connecting=true;button.disabled=true;error.textContent='';
   try{
@@ -1177,5 +1208,6 @@ async function restoreRoom(){
  }catch{stopOnline();}
  finally{connecting=false;}
  if(invited){stopOnline(true);setMode('multi');openMultiplayer('join');}
+ else if(invitedHost()){stopOnline(true);setMode('multi');openMultiplayer('create');history.replaceState(null,'',location.pathname+location.search);}
 }
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',initialize,{once:true});else initialize();
