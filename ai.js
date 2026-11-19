@@ -47,6 +47,20 @@ function availableCombos(v){
 function publicTexture(combo,street,board){
  return combo.textures[street]??=texture(combo.cards,board);
 }
+function humanTableRead(v){
+ const humans=v.players.filter(player=>player.id!==v.seat&&player.isHuman);
+ if(!humans.length)return {loose:false,activeHumans:0,entered:0,avgVpip:0};
+ const ids=new Set(humans.map(player=>player.id));
+ const entered=new Set();
+ for(const event of v.events){
+  if(event.kind!=='action'||!ids.has(event.seat)||event.type==='fold'||event.type==='check')continue;
+  entered.add(event.seat);
+ }
+ const active=humans.filter(player=>!player.folded);
+ const samples=humans.filter(player=>player.stats?.hands>=3);
+ const avgVpip=samples.length?samples.reduce((sum,player)=>sum+player.stats.vpip/player.stats.hands,0)/samples.length:0;
+ return {loose:active.length>=2&&(entered.size>=2||avgVpip>.44),activeHumans:active.length,entered:entered.size,avgVpip};
+}
 function actionLikelihood(v,tendency,late,{event,priorRaises},hand){
  const pre=event.street==='preflop',headsUp=v.players.length===2;
  const size=event.amount/Math.max(v.bb,event.pot-event.amount);
@@ -123,6 +137,7 @@ export function estimateEquity(v,{samples=180,rng=secureRandom}={}){
 function standardDecision(v,{rng,samples,memory}){
  const persona=v.personality,l=v.legal,me=v.players[v.seat],opps=v.players.filter(p=>p.id!==v.seat&&!p.folded),eq=estimateEquity(v,{rng,samples});
  const sticky=clamp(persona.sticky??0,0,.85);
+ const humanRead=humanTableRead(v);
  const tex=texture(v.hole,v.board),pre=v.street==='preflop',position=seatOffset(v,v.seat),late=latePosition(v,v.seat);
  const mood=tableMood(persona,v.events,v.seat);
  if(memory.hand!==v.hand||memory.sessionId!==v.sessionId){Object.keys(memory).forEach(k=>delete memory[k]);memory.hand=v.hand;memory.sessionId=v.sessionId;memory.plan=null;memory.actions=[];}
@@ -148,7 +163,7 @@ function standardDecision(v,{rng,samples,memory}){
  if(memory.plan==='bluff-catch')callScore+=v.bb*persona.courage;
  if(memory.plan==='float')callScore+=v.bb*.6*persona.curiosity;
  if(memory.plan==='trap')callScore+=v.bb*persona.trap;
- if(pre){const threshold=.77-persona.loose*.65-(late?.07:0);callScore-=(Math.max(0,threshold-tex.power))*v.bb*5;}
+ if(pre){const threshold=.77-persona.loose*.65-(late?.07:0);callScore-=(Math.max(0,threshold-tex.power))*v.bb*5;if(humanRead.loose)callScore-=Math.max(0,.52-tex.power)*v.bb*2.6;}
  if(!l.canCheck)callScore+=v.bb*sticky*.9+l.call*sticky*.22;
  if(!l.canCheck)add('call',0,callScore,bluffCatch>.008?'对手进攻较多，扩大抓诈范围':'以范围胜率比较底池赔率');
  if(l.canRaise){
@@ -157,7 +172,7 @@ function standardDecision(v,{rng,samples,memory}){
   const totals=[...new Set(sizes.map(s=>clamp(pre?s:me.bet+l.call+s,l.min,l.max)).map(x=>x===l.max?l.max:Math.max(l.min,Math.min(l.max,snapBet(x)))))].filter(to=>to>v.currentBet&&(to===l.max||(to%BET_UNIT===0&&to>=l.min&&to<=l.max)));
   const hasInitiative=v.events.filter(e=>e.kind==='action'&&e.type==='raise').at(-1)?.seat===v.seat;
   const value=pre?tex.power>.78:eq>Math.max(.57,1/opps.length*.7);
-  const bluffChance=persona.bluff*(late?1.18:.85)*(opps.length>2?.3:1)*(foldRate>.5?1.3:1)*(hasInitiative?1.25:1);
+  const bluffChance=persona.bluff*(late?1.18:.85)*(opps.length>2?.3:1)*(foldRate>.5?1.3:1)*(hasInitiative?1.25:1)*(humanRead.loose?.62:1);
   const bluffIntent=!value&&(memory.plan==='semi-bluff'||memory.plan==='take-away'||rng()<bluffChance)&&(tex.draw>0||tex.blocker||hasInitiative||pre&&late||v.street==='river');
   const slowPlay=value&&memory.plan==='trap'&&opps.length<=2&&!(priorTrap&&l.call>0);
   for(const to of totals){
@@ -168,6 +183,7 @@ function standardDecision(v,{rng,samples,memory}){
    const effectiveCost=Math.min(cost,Math.max(...opps.map(p=>p.stack+p.bet))-me.bet);
    const ev=fe*v.pot+(1-fe)*(calledEq*(v.pot+effectiveCost*1.65)-effectiveCost);
    let score=ev+(value?persona.aggression*v.bb*.7:0);
+   if(humanRead.loose)score+=value?v.pot*.035:-v.bb*.35;
    if(!value&&!bluffIntent)score-=v.pot*.45+v.bb;
    if(bluffIntent)score+=v.pot*(.14+tex.draw)+(tex.blocker?v.bb*.6:0);
    if(slowPlay)score-=v.pot*.6;
@@ -183,6 +199,8 @@ function standardDecision(v,{rng,samples,memory}){
      const fit=tex.power-openThreshold;
      score=fit>=0?v.bb*(.45+fit*6+persona.aggression*.35)-Math.max(0,to-v.bb*4)*.13:v.bb*(fit*12-.7);
      if(limpers&&fit>0)score+=v.bb*persona.aggression*.2;
+     if(humanRead.loose&&fit>0)score+=v.bb*(.35+persona.aggression*.35);
+     if(humanRead.loose&&fit<0)score-=v.bb*.45;
      if(to>v.bb*10&&me.stack>v.bb*15)score-=to*.3;
      if(late&&foldRate>.55&&fit>-.07)score+=v.bb*persona.adapt*.7;
     }else{
@@ -443,13 +461,13 @@ export function advise(v,{raiseTo,samples=2400,rng,memory}={}){
 }
 
 function easyDecision(v,{rng,samples}){
- const l=v.legal,persona=v.personality,pre=v.street==='preflop',sticky=clamp(persona.sticky??0,0,.85);
+ const l=v.legal,persona=v.personality,pre=v.street==='preflop',sticky=clamp(persona.sticky??0,0,.85),humanRead=humanTableRead(v);
  const equity=estimateEquity(v,{rng,samples});
  const potOdds=l.call/(v.pot+l.call||1);
  const power=texture(v.hole,v.board).power;
  const perceivedEquity=equity+(rng()-.5)*.21;
  const to=legalRaise(v,v.currentBet+Math.max(v.bb*2,(v.pot+l.call)*.5));
- if(l.canRaise&&power>(pre?.79:.72)&&rng()<.48+persona.aggression*.26-sticky*.3){
+ if(l.canRaise&&power>((pre&&humanRead.loose)?.68:pre?.79:.72)&&rng()<.48+persona.aggression*.26-sticky*.3+(humanRead.loose?.08:0)){
   return {type:'raise',to,equity,potOdds,samples,reason:'强牌主动下注'};
  }
  if(l.canCheck)return {type:'check',to:0,equity,potOdds,samples,reason:'过牌看下一张'};
@@ -676,7 +694,7 @@ function expertAdjustment(model,action,equity){
 function wideRangeDecision(v,{rng,samples}){
  const model=buildModel(v),scenarios=generateScenarios(model,samples,rng);
  const {equity,actions}=actionEstimates(model,scenarios,candidateActions(v,undefined,false));
- const l=v.legal,pre=v.street==='preflop',late=latePosition(v,v.seat),persona=v.personality;
+ const l=v.legal,pre=v.street==='preflop',late=latePosition(v,v.seat),persona=v.personality,humanRead=humanTableRead(v);
  const sticky=clamp(persona.sticky??0,0,.85);
  const own=texture(v.hole,v.board);
  const potOdds=l.call/(v.pot+l.call||1);
@@ -686,7 +704,7 @@ function wideRangeDecision(v,{rng,samples}){
   const wager=action.type==='raise'?action.to-model.hero.bet:l.call;
   let ev=action.ev;
   if(pre){
-   const threshold=.61-persona.loose*.18-(late?.065:0)+Math.min(raises,3)*.08;
+   const threshold=.61-persona.loose*.18-(late?.065:0)+Math.min(raises,3)*.08-(humanRead.loose?.035:0);
    ev-=Math.max(0,threshold-own.power)*(v.bb*12+wager*.9);
   }
   if(v.board.length<5&&wager>0&&model.opponents.some(({player})=>player.stack>wager)){
@@ -698,8 +716,9 @@ function wideRangeDecision(v,{rng,samples}){
    const pressured=l.call>v.pot*.17||raises>1;
    const value=equity>Math.max(pressured?.67:.52,1/(model.opponents.length+1)+.08);
    ev-=v.bb*sticky*1.2+(value?0:wager*sticky*.2);
-   if(value)ev+=v.bb*persona.aggression*.22;
+   if(value){ev+=v.bb*persona.aggression*.22;if(humanRead.loose)ev+=v.bb*.22;}
    else{
+    if(humanRead.loose)ev-=wager*.12;
     if(!own.blocker&&!own.draw)ev-=wager*(.10-persona.bluff*.1+sticky*.1);
     if(pressured)ev-=Math.max(0,wager-l.call)*(.25-own.draw*.45);
    }
@@ -730,6 +749,7 @@ function hardDecision(v,{rng,samples}){
  }
  equity/=trials;
  const sticky=clamp(v.personality.sticky??0,0,.85);
+ const humanRead=humanTableRead(v);
  const scored=actions.map(action=>{
   if(action.type==='fold')return {...action,ev:0,score:0};
   const ev=scenarios.outcomes.reduce((sum,outcome)=>sum+expertPayoff(model,action,outcome),0)/trials;
@@ -737,6 +757,7 @@ function hardDecision(v,{rng,samples}){
   let score=ev+expertAdjustment(model,action,equity)+(rng()-.5)*variation;
   if(action.type==='call')score+=v.bb*sticky*.8+v.legal.call*sticky*.16;
   if(action.type==='raise')score-=v.bb*sticky*1.2+(equity<.48?v.bb*sticky*.5:0);
+  if(humanRead.loose&&action.type==='raise')score+=equity>.6?v.bb*.25:-v.bb*.2;
   return {...action,ev,score};
  });
  const best=scored.reduce((a,b)=>b.score>a.score?b:a);

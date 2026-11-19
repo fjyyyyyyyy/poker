@@ -14,7 +14,7 @@
  * 房间数据保存在内存里，进程重启即清空。
  */
 import { createServer } from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { gzipSync } from 'node:zlib';
 import { randomBytes } from 'node:crypto';
 import { networkInterfaces } from 'node:os';
@@ -23,8 +23,10 @@ import { fileURLToPath } from 'node:url';
 import { Game, AI_LEVELS, MIN_SEATS, MAX_SEATS, TURN_LIMIT_MS } from './engine.js';
 import { EMOTES, EMOTE_COOLDOWN_MS } from './emotes.js';
 import { decide } from './ai.js';
+import { evaluate } from './evaluator.js';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
+const LEADERBOARD_FILE = resolve(ROOT, '.leaderboard.json');
 const PORT = Number(process.env.PORT) || 8787;
 const HOST = process.env.HOST || '0.0.0.0';
 
@@ -64,6 +66,7 @@ const MIME = {
 };
 
 const rooms = new Map();
+let recentLeaderboard = [];
 
 class HttpError extends Error {
   constructor(status, message, extra = {}) {
@@ -210,6 +213,80 @@ function removeHuman(room, token) {
   bump(room);
 }
 
+async function loadLeaderboard() {
+ try {
+  const parsed = JSON.parse(await readFile(LEADERBOARD_FILE, 'utf8'));
+  if (Array.isArray(parsed)) recentLeaderboard = parsed.filter(entry => entry && Number.isFinite(entry.at));
+ } catch { recentLeaderboard = []; }
+}
+
+function saveLeaderboard() {
+ writeFile(LEADERBOARD_FILE, JSON.stringify(recentLeaderboard)).catch(() => {});
+}
+
+function recordLeaderboard(room) {
+ const game = room.game;
+ if (game.phase !== 'complete' || !game.result) return;
+ const key = `${game.sessionId}:${game.hand}`;
+ if (room.lastLeaderboardKey === key) return;
+ room.lastLeaderboardKey = key;
+ const isHuman = id => !!game.players[id]?.isHuman;
+ const revealed = new Map((game.result.revealed || []).map(entry => [entry.id, entry]));
+ const board = [...game.board];
+ const at = Date.now();
+ const detailFor = (winnerId, entry, amount) => {
+  const winner = game.players[winnerId];
+  return {
+   winner: { name: winner.name, seat: winnerId + 1, isHuman: isHuman(winnerId) },
+   hand: entry?.hand || '未摊牌', amount, pot: game.result.total, board,
+   hole: entry?.hole || [],
+   players: game.players.map((player, id) => ({
+    name: player.name, seat: id + 1, isHuman: isHuman(id), folded: player.folded,
+    hole: revealed.get(id)?.hole || [], hand: revealed.get(id)?.hand || null, stack: player.stack
+   })),
+   winners: (game.result.winningSeats || []).map(id => ({ name: game.players[id].name, seat: id + 1, amount: game.result.contestAwards[id] || 0 }))
+  };
+ };
+ const entries = [];
+ for (const winnerId of game.result.winningSeats || []) {
+  if (!isHuman(winnerId)) continue;
+  const amount = game.result.contestAwards[winnerId] || 0;
+  if (amount <= 0) continue;
+  const entry = revealed.get(winnerId);
+  entries.push({
+   id: `win:${game.sessionId}:${game.hand}:${winnerId}`, kind: 'win', amount, score: amount, at,
+   winner: game.players[winnerId].name, hand: entry?.hand || '未摊牌',
+   board, hole: entry?.hole || [], detail: detailFor(winnerId, entry, amount)
+  });
+ }
+ let best = null;
+ for (const entry of game.result.revealed || []) {
+  if (!isHuman(entry.id)) continue;
+  const ranked = evaluate([...entry.hole, ...game.board]);
+  if (!best || ranked.score > best.score) best = { ...entry, name: ranked.name, score: ranked.score };
+ }
+ if (best) {
+  const amount = game.result.contestAwards[best.id] || 0;
+  entries.push({
+   id: `hand:${game.sessionId}:${game.hand}`, kind: 'hand', amount, score: best.score, at,
+   winner: game.players[best.id].name, hand: best.name,
+   board, hole: best.hole || [], detail: detailFor(best.id, best, amount)
+  });
+ }
+ if (!entries.length) return;
+ const seen = new Set(recentLeaderboard.map(entry => entry.id));
+ recentLeaderboard.push(...entries.filter(entry => !seen.has(entry.id)));
+ const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+ recentLeaderboard = recentLeaderboard.filter(entry => entry.at >= cutoff).slice(-500);
+ saveLeaderboard();
+}
+
+function leaderboardPayload() {
+ const by = (kind, field) => recentLeaderboard.filter(entry => entry.kind === kind)
+  .sort((a, b) => (b[field] || 0) - (a[field] || 0) || b.at - a.at).slice(0, 10);
+ return { wins: by('win', 'amount'), hands: by('hand', 'score'), updatedAt: Date.now() };
+}
+
 function bump(room) {
   const game = room.game;
   room.version++;
@@ -218,6 +295,7 @@ function bump(room) {
   room.nextThinkAt = 0;
   room.nextDealAt = 0;
   room.lastActivity = Date.now();
+ recordLeaderboard(room);
 }
 
 function pickJoinSeat(room) {
@@ -392,6 +470,7 @@ function buildState(room, seat, spectator = false) {
     awayReason: spectator ? null : (viewer?.awayReason || null),
     spectators: room.spectators.size,
     humans: room.humans.size,
+    humanSeats: spectator ? [] : [...room.humans.values()].map(item => map(item.seat)),
     turnKey: room.turnKey,
     turnRemaining: spectator || away ? 0 : (game.actor != null ? Math.max(0, room.actorSince + (room.turnMs || TURN_MS) - Date.now()) : 0),
     turnMs: room.turnMs || TURN_MS,
@@ -705,6 +784,34 @@ async function handleApi(req, res, url, segments) {
 
   if (op === 'reclaim') {
     reclaimHuman(room, human);
+  } else if (op === 'kick') {
+    if (!isHost) throw new HttpError(403, '只有房主可以踢出玩家');
+    const seat = Number(body.seat);
+    if (!Number.isInteger(seat) || seat < 0 || seat >= game.players.length) throw new HttpError(400, '座位不存在');
+    if (seat === human.seat) throw new HttpError(400, '不能踢出自己');
+    const target = [...room.humans.entries()].find(([, item]) => item.seat === seat);
+    if (!target) throw new HttpError(404, '这个座位没有真人');
+    removeHuman(room, target[0]);
+  } else if (op === 'fillAI') {
+    if (!isHost) throw new HttpError(403, '只有房主可以补 AI');
+    const seat = Number(body.seat);
+    if (!Number.isInteger(seat) || seat < 0 || seat >= game.players.length) throw new HttpError(400, '座位不存在');
+    if ([...room.humans.values()].some(item => item.seat === seat)) throw new HttpError(409, '这个座位有真人，请先踢出');
+    if (!['idle', 'complete'].includes(game.phase)) throw new HttpError(409, '本手结束后才能补 AI');
+    const player = game.players[seat];
+    player.isHuman = false;
+    player.stack = game.buyin;
+    player.debt = 0;
+    player.pendingLoan = 0;
+    player.loans = [];
+    player.hole = [];
+    player.folded = false;
+    player.bet = 0;
+    player.total = 0;
+    player.lastAction = '';
+    player.stats = { hands: 0, vpip: 0, pfr: 0, raises: 0, calls: 0, folds: 0, faced: 0, foldToBet: 0, showdowns: 0, shownBluffs: 0 };
+    room.aiMemory[seat] = {};
+    room.emoteCooldowns[seat] = 0;
   } else if (op === 'away') {
     markAway(room, human.seat, 'manual');
   } else if (op === 'start') {
@@ -797,6 +904,11 @@ async function handle(req, res) {
       });
       return;
     }
+    if (segments[1] === 'leaderboard') {
+      if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, '不支持的请求方法');
+      sendJson(req, res, 200, leaderboardPayload());
+      return;
+    }
     if (segments[1] !== 'rooms') throw new HttpError(404, '接口不存在');
     await handleApi(req, res, url, segments);
     return;
@@ -826,6 +938,8 @@ server.on('error', error => {
   }
   process.exit(1);
 });
+
+await loadLeaderboard();
 
 server.listen(PORT, HOST, () => {
   const port = server.address().port;

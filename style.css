@@ -1121,3 +1121,50 @@ dialog{width:min(660px,calc(100vw - 32px));padding:26px;max-height:88vh}.modal-t
 @media(max-width:1230px){.table-scene{height:560px}.seat-0{top:80%}}
 @media(max-width:1050px){.table-scene{height:600px}.seat-0{top:80%}}
 @media(max-width:650px){.table-scene{height:630px}.seat-0{top:81%}}
+
+/* Global recent leaderboards */
+.lb-tabs{display:flex;gap:8px;border-bottom:1px solid #e1e7d8;margin-bottom:14px}
+.lb-tabs button{border:0;background:none;padding:9px 5px;color:#849174;font-size:14px;position:relative}
+.lb-tabs button.selected{color:#345b38;font-weight:700}
+.lb-tabs button.selected:after{content:'';position:absolute;left:0;right:0;bottom:-1px;height:2px;background:#47704b}
+.lb-list{display:flex;flex-direction:column;gap:6px}
+.lb-row{display:flex;align-items:center;gap:14px;width:100%;min-height:47px;padding:9px 12px;border:1px solid #e1e8d9;border-radius:8px;background:#fff;color:#3d5738;text-align:left}
+.lb-row:hover{background:#f3f7ed;border-color:#c7d9ba}
+.lb-rank{font-size:12px;font-weight:800;color:#9aa88a;min-width:22px}
+.lb-row:first-child .lb-rank{color:#b18436}
+.lb-row strong{font-size:16px;font-weight:700;color:#315837}
+.lb-open{margin-left:auto;font-size:12px;color:#71866a}
+.lb-note,.lb-empty{font-size:11px;color:#839276;line-height:1.7;margin:14px 0 0}
+.lb-detail-head{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:15px}
+.lb-detail-head>div,.lb-facts>span{display:flex;flex-direction:column;gap:3px;padding:10px 12px;background:#f1f6eb;border:1px solid #e2ead8;border-radius:8px}
+.lb-detail-head small,.lb-cards small{font-size:10px;color:#849477}
+.lb-detail-head strong{font-size:17px;color:#345d39}
+.lb-cards{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:12px 0}
+.lb-card-row{display:flex;gap:4px;flex-wrap:wrap;min-height:48px;align-items:center;margin-top:6px}
+.lb-card-row .card{width:35px;height:49px;border-radius:4px}
+.lb-card-row .card-corner{font-size:15px;top:3px;left:3px}
+.lb-card-row .card-corner small{font-size:10px}
+.lb-card-row .card-center{font-size:19px;right:4px;bottom:4px}
+.lb-none{font-size:12px;color:#98a28d}
+.lb-facts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:14px 0}
+.lb-facts strong{color:#49633d;font-size:13px;margin-top:3px}
+.lb-players{border-top:1px solid #e4eadc;margin-top:16px;padding-top:10px;display:flex;flex-direction:column;gap:7px}
+.lb-players>div{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:12px;color:#5c704f}
+.lb-player-cards{display:flex;gap:3px;align-items:center}
+.lb-player-cards .card{width:24px;height:33px;border-radius:3px}
+.lb-player-cards .card-corner{font-size:10px;top:2px;left:2px}
+.lb-player-cards .card-corner small{font-size:7px}
+.lb-player-cards .card-center{font-size:11px;right:2px;bottom:2px}
+.lb-player-cards em{font-size:10px;color:#9ba694;font-style:normal}
+.lb-winner-line{font-size:12px;color:#687b59;margin:14px 0 3px}
+@media(max-width:650px){.lb-detail-head,.lb-cards{grid-template-columns:1fr}.lb-detail-head{gap:7px}.lb-facts{gap:5px}.lb-facts>span{padding:8px}.lb-facts strong{font-size:12px}.lb-row{min-height:44px;padding:8px 9px;gap:9px}.lb-row strong{font-size:14px}.lb-open{font-size:11px}.lb-card-row{min-height:42px}.lb-card-row .card{width:30px;height:42px}.lb-cards{margin:9px 0}.lb-none{font-size:11px}}
+
+/* Host seat management */
+.host-seat-manager{margin-top:18px;padding:12px;border:1px solid #dce7d4;border-radius:9px;background:#f7faf2}
+.host-seat-manager h3{margin:0 0 7px!important;font-size:14px!important}
+.host-seat-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 0;border-top:1px solid #e7ede0;font-size:12px;color:#52664b}
+.host-seat-row:first-of-type{border-top:0}
+.host-seat-actions{display:flex;gap:6px;align-items:center}
+.host-seat-actions .text-button{font-size:11px;padding:3px 4px;min-height:27px}
+.host-seat-actions .text-button:first-child{color:#8b4038}
+@media(max-width:650px){.host-seat-manager{padding:9px}.host-seat-row{font-size:11px;gap:5px}.host-seat-actions{gap:3px}.host-seat-actions .text-button{font-size:10px}}

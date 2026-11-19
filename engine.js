@@ -169,7 +169,7 @@ export class Game {
  }
  publicView(id){
   // Deliberate allowlist: never serialize deck, opponent hole cards, burns, or private decisions.
-  return {sessionId:this.sessionId,hand:this.hand,seat:id,aiLevel:this.aiLevel,personality:structuredClone(this.personalities[id]),hole:[...this.players[id].hole],board:[...this.board],street:this.street,button:this.button,sbSeat:this.sbSeat,bbSeat:this.bbSeat,sb:this.sb,bb:this.bb,betUnit:this.betUnit,pot:this.pot,currentBet:this.currentBet,minRaise:this.minRaise,legal:this.legal(id),players:this.players.map(p=>({id:p.id,name:p.name,stack:p.stack,bet:p.bet,total:p.total,folded:p.folded,stats:{...p.stats}})),events:structuredClone(this.events)};
+  return {sessionId:this.sessionId,hand:this.hand,seat:id,aiLevel:this.aiLevel,personality:structuredClone(this.personalities[id]),hole:[...this.players[id].hole],board:[...this.board],street:this.street,button:this.button,sbSeat:this.sbSeat,bbSeat:this.bbSeat,sb:this.sb,bb:this.bb,betUnit:this.betUnit,pot:this.pot,currentBet:this.currentBet,minRaise:this.minRaise,legal:this.legal(id),players:this.players.map(p=>({id:p.id,name:p.name,isHuman:!!p.isHuman,stack:p.stack,bet:p.bet,total:p.total,folded:p.folded,stats:{...p.stats}})),events:structuredClone(this.events)};
  }
  borrow(id){
   const p=this.players[id];if(!p)throw Error('玩家不存在');

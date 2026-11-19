@@ -4,7 +4,8 @@ import {EMOTES,EMOTE_COOLDOWN_MS} from './emotes.js';
 import {SUITS,RANKS,suit,cardText} from './evaluator.js';
 const $=s=>document.querySelector(s),fmt=n=>Math.round(n).toLocaleString('en-US');
 const levelLabels={easy:'入门',normal:'标准',hard:'高手'};
-const prefs={sound:true,volume:.45,speed:1,autoNext:false,assist:false,seatCount:DEFAULT_SEATS,aiLevel:DEFAULT_AI_LEVEL,turnSeconds:30};
+const prefs={sound:true,volume:.45,speed:1,autoNext:false,assist:false,seatCount:DEFAULT_SEATS,aiLevel:DEFAULT_AI_LEVEL,turnSeconds:30,allInMusic:'kpl'};
+const ALL_IN_TRACKS={default:{src:'allin.mp3',label:'原版全下曲'},kpl:{src:'allin-kpl.m4a',label:'我的音乐 · 巅峰对决片段'}};
 const TURN_VALUES=[15,30,45,60,120,300];
 function turnLabel(ms){const s=Math.max(1,Math.round(ms/1000));return s>=60?`${Math.round(s/60)} 分钟`:`${s} 秒`;}
 function currentTurnMs(){return online?(online.turnMs||TURN_LIMIT_MS):(Number(prefs.turnSeconds||30)*1000);}
@@ -327,6 +328,20 @@ function primeAllInAudio(){
  allInTrackPrimed=true;
  try{track.load();}catch{}
 }
+function selectedAllInMode(){
+ if(prefs.allInMusic==='custom')return customAllIn?'custom':'kpl';
+ return ALL_IN_TRACKS[prefs.allInMusic]?prefs.allInMusic:'kpl';
+}
+function applyAllInTrackSource(){
+ const track=$('#allInTrack');if(!track)return;
+ const mode=prefs.allInMusic==='default'?'default':'kpl';
+ const source=ALL_IN_TRACKS[mode].src;
+ if(!track.getAttribute('src')?.endsWith(source)){track.setAttribute('src',source);try{track.load();}catch{}}
+}
+function updateAllInTrackLabel(){
+ const label=$('#allInTrackName');
+ if(label)setText(label,prefs.allInMusic==='custom'?(customAllIn?.name||'请选择自定义文件'):ALL_IN_TRACKS[selectedAllInMode()].label);
+}
 function triggerAllIn(event){
  const player=game.players[event.seat];if(!player)return;
  const overlay=$('#allInFx');if(!overlay)return;
@@ -338,8 +353,9 @@ function triggerAllIn(event){
  allInTimer=setTimeout(()=>overlay.classList.remove('show'),2050);
  setTimeout(()=>scene.classList.remove('all-in-impact'),720);
  initAudio();
+ applyAllInTrackSource();
  const builtinTrack=$('#allInTrack');
- const useCustom=!!customAllIn;
+ const useCustom=selectedAllInMode()==='custom'&&!!customAllIn;
  if(prefs.sound){bgmDucked=true;clearTimeout(bgmResumeTimer);pauseBgm();}
  if(prefs.sound&&(useCustom||builtinTrack)){
   try{
@@ -732,19 +748,50 @@ function openProfiles(){
 function openRules(){
  openModal('游戏规则',`<div class="rule-row"><span>牌桌</span><strong>${MIN_SEATS}–${MAX_SEATS} 人无限注德州扑克</strong></div><div class="rule-row"><span>盲注</span><strong>10 / 20</strong></div><div class="rule-row"><span>初始筹码</span><strong>2,000</strong></div><h3>发牌顺序</h3><p>每人两张底牌。翻牌发 3 张公共牌，转牌和河牌各发 1 张。</p><h3>下注</h3><p>输入本轮投入总额，按 10 筹码递增。全下使用全部剩余筹码。多人全下按边池结算，平局分池。</p><h3>强制还款</h3><p>筹码高于 ${fmt(FORCE_REPAY_AT)} 时，超出 ${fmt(FORCE_REPAY_AT)} 的部分会自动用于偿还欠款，真人玩家和 AI 都适用。</p><h3>借筹码</h3><p>只有筹码低于 ${fmt(BORROW_THRESHOLD)} 时才能借入 ${fmt(LOAN_AMOUNT)}；累计欠款最多 ${fmt(MAX_DEBT)}（${Math.floor(MAX_DEBT/LOAN_AMOUNT)} 次），还清欠款后可以再借。牌局中借入的筹码下手到账；即使到账前输光，下一手开始时会自动补回。</p><h3>思考时间</h3><p>每位玩家每回合 ${turnLabel(currentTurnMs())}（创建房间时可在 15 秒–5 分钟之间选择）；超时自动过牌/弃牌，联机时该座位转由 AI 代打。掉线 30 秒同样由 AI 代打，但会保留登录凭证：回来自动恢复，超时可在行动栏点「重新接管」。</p><h3>入座与观战</h3><p>加入时可自选接替某个 AI 座位（重新买入 2,000），或新开一个房间；每个座位标注“真人”或“AI”。房间面板可「暂时离开」：座位交给 AI 但保留重连凭证，首页会出现“回到房间”，刷新或重新打开页面也会自动恢复；「彻底退出」才会释放座位。观战加入不占座、看不到任何底牌、不能操作牌局。摊牌时会出现双方牌型对比动画，展示约 10 秒，点击任意处可跳过。</p><h3>表情</h3><p>牌桌有 15 个表情（含「😫 闹麻了」「🤡 小丑」「🍬 糖完了」「📱 扫码了」），10–20 筹码一次，8 秒冷却；筹码从自己的座位扣除，所有玩家都能看到气泡。观战或暂时离开时不能发表情。</p><h3>AI 辅助</h3><p>AI 辅助只在单人练习中可用；联机房间为公平起见不提供。</p><h3>牌型</h3><p>同花顺 › 四条 › 葫芦 › 同花 › 顺子 › 三条 › 两对 › 一对 › 高牌。取最强的五张牌。</p><p>快捷键 F 弃牌，C 过牌或跟注，R 下注或加注。</p>`);
 }
+let leaderboardCache=null;
+const lbEscape=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+function lbDate(at){try{return new Date(at).toLocaleDateString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});}catch{return '';}}
+function lbRows(kind){
+ const list=kind==='win'?leaderboardCache.wins:leaderboardCache.hands;
+ if(!list.length)return '<p class="lb-empty">近期还没有线上完整牌局上榜。</p>';
+ return `<div class="lb-list">${list.map((entry,index)=>`<button type="button" class="lb-row" data-lb-kind="${kind}" data-lb-index="${index}"><span class="lb-rank">${String(index+1).padStart(2,'0')}</span><strong>${kind==='win'?'+'+fmt(entry.amount):lbEscape(entry.hand)}</strong><span class="lb-open">详情 ›</span></button>`).join('')}</div>`;
+}
+function bindLbRows(){document.querySelectorAll('[data-lb-kind]').forEach(button=>button.onclick=()=>openLbDetail(button.dataset.lbKind,Number(button.dataset.lbIndex)));}
+function openLeaderboard(tab='win'){
+ openModal('排行榜',`<div class="lb-tabs"><button type="button" data-lb-tab="win" ${tab==='win'?'class="selected"':''}>最大赢池</button><button type="button" data-lb-tab="hand" ${tab==='hand'?'class="selected"':''}>最强牌型</button></div><div id="lbList" aria-live="polite">加载中…</div><p class="lb-note">线上房间近 30 天 · 仅统计真人玩家 · 点开可看牌面和详情</p>`);
+ const list=$('#lbList');
+ const render=()=>{list.innerHTML=lbRows(tab);bindLbRows();};
+ document.querySelectorAll('[data-lb-tab]').forEach(button=>button.onclick=()=>{tab=button.dataset.lbTab;document.querySelectorAll('[data-lb-tab]').forEach(item=>item.classList.toggle('selected',item===button));render();});
+ if(leaderboardCache){render();return;}
+ fetch('/api/leaderboard',{signal:AbortSignal.timeout?.(12000)}).then(response=>{if(!response.ok)throw Error('联机服务暂时不可用');return response.json();}).then(data=>{leaderboardCache={wins:data.wins||[],hands:data.hands||[]};render();}).catch(error=>{list.innerHTML=`<p class="lb-empty">${lbEscape(error.message||'排行榜暂时不可用')}</p>`;});
+}
+function openLbDetail(kind,index){
+ const entry=(kind==='win'?leaderboardCache?.wins:leaderboardCache?.hands)?.[index];if(!entry)return;
+ const detail=entry.detail||{},hole=detail.hole||entry.hole||[],board=detail.board||entry.board||[],players=detail.players||[],winners=detail.winners||[];
+ const cards=values=>values.length?values.map(value=>card(value)).join(''):'<span class="lb-none">未摊牌</span>';
+ openModal(kind==='win'?'最大赢池详情':'最强牌型详情',`<div class="lb-detail"><div class="lb-detail-head"><div><small>${kind==='win'?'赢池':'牌型'}</small><strong>${kind==='win'?'+'+fmt(entry.amount):lbEscape(entry.hand)}</strong></div><div><small>${kind==='win'?'获胜者':'牌型持有者'}</small><strong>${lbEscape(entry.winner)}</strong></div></div><div class="lb-cards"><div><small>底牌</small><div class="lb-card-row">${cards(hole)}</div></div><div><small>公共牌</small><div class="lb-card-row">${cards(board)}</div></div></div><div class="lb-facts"><span>底池 <strong>${fmt(detail.pot??entry.amount)}</strong></span><span>牌型 <strong>${lbEscape(detail.hand||entry.hand||'未摊牌')}</strong></span><span>时间 <strong>${lbDate(entry.at)}</strong></span></div>${players.length?`<h3>本手玩家</h3><div class="lb-players">${players.map(player=>`<div><span>${player.seat} 号 · ${lbEscape(player.name)}${player.folded?' · 已弃牌':''}</span><span class="lb-player-cards">${player.hole?.length?player.hole.map(value=>card(value)).join(''):'<em>未摊牌</em>'}</span></div>`).join('')}</div>`:''}${winners.length?`<p class="lb-winner-line">赢池分配：${winners.map(winner=>`${lbEscape(winner.name)} +${fmt(winner.amount)}`).join(' · ')}</p>`:''}<button type="button" class="text-button" id="lbBack">← 返回排行榜</button></div>`);
+ $('#lbBack').onclick=()=>openLeaderboard(kind==='win'?'win':'hand');
+}
 function openSettings(){
- openModal('设置',`<div class="setting-row"><label for="settingSound">音效</label><input type="checkbox" id="settingSound" ${prefs.sound?'checked':''}></div><div class="setting-row"><label for="settingVolume">音量</label><input type="range" id="settingVolume" min="0" max="1" step=".05" value="${prefs.volume}"></div><div class="setting-row"><span>全下音效<small>仅本机生效</small></span><strong id="allInTrackName">${customAllIn?.name||'默认合成音效'}</strong></div><div class="setting-row"><label for="allInAudioInput">自定义音频<small>不会上传，也不随游戏分发</small></label><span class="audio-actions"><button type="button" id="pickAllInAudio" class="text-button">选择文件</button><button type="button" id="clearAllInAudio" class="text-button">恢复默认</button></span></div><input type="file" id="allInAudioInput" accept="audio/*" hidden><div class="setting-row"><span>AI 强度</span><strong>${levelLabels[game.aiLevel]}</strong></div>${online?'':`<div class="setting-row"><label for="settingAssist">AI 辅助</label><input type="checkbox" id="settingAssist" ${prefs.assist?'checked':''}></div>`}${online?'':`<div class="setting-row"><label for="settingSpeed">AI 节奏</label><select id="settingSpeed"><option value="1" ${prefs.speed===1?'selected':''}>标准</option><option value="2.5" ${prefs.speed!==1?'selected':''}>快速</option></select></div><div class="setting-row"><label for="settingAuto">自动下一手</label><input type="checkbox" id="settingAuto" ${prefs.autoNext?'checked':''}></div>`}${online&&!online.host?'':'<button class="action-button modal-action" id="resetTable">重置牌桌</button>'}`);
+ openModal('设置',`<div class="setting-row"><label for="settingSound">音效</label><input type="checkbox" id="settingSound" ${prefs.sound?'checked':''}></div><div class="setting-row"><label for="settingVolume">音量</label><input type="range" id="settingVolume" min="0" max="1" step=".05" value="${prefs.volume}"></div><div class="setting-row"><label for="allInMusicSelect">全下音乐</label><select id="allInMusicSelect"><option value="default" ${prefs.allInMusic==='default'?'selected':''}>原版全下曲</option><option value="kpl" ${prefs.allInMusic==='kpl'?'selected':''}>我的音乐 · 巅峰对决片段</option><option value="custom" ${prefs.allInMusic==='custom'?'selected':''}>自定义文件</option></select></div><div class="setting-row"><span>当前全下音乐<small>仅本机生效</small></span><strong id="allInTrackName">${prefs.allInMusic==='custom'?(customAllIn?.name||'未选择文件'):ALL_IN_TRACKS[prefs.allInMusic==='default'?'default':'kpl'].label}</strong></div><div class="setting-row"><label for="allInAudioInput">自定义音频<small>不会上传，也不随游戏分发</small></label><span class="audio-actions"><button type="button" id="pickAllInAudio" class="text-button">选择文件</button><button type="button" id="clearAllInAudio" class="text-button">清除自定义</button></span></div><input type="file" id="allInAudioInput" accept="audio/*" hidden><div class="setting-row"><span>AI 强度</span><strong>${levelLabels[game.aiLevel]}</strong></div>${online?'':`<div class="setting-row"><label for="settingAssist">AI 辅助</label><input type="checkbox" id="settingAssist" ${prefs.assist?'checked':''}></div>`}${online?'':`<div class="setting-row"><label for="settingSpeed">AI 节奏</label><select id="settingSpeed"><option value="1" ${prefs.speed===1?'selected':''}>标准</option><option value="2.5" ${prefs.speed!==1?'selected':''}>快速</option></select></div><div class="setting-row"><label for="settingAuto">自动下一手</label><input type="checkbox" id="settingAuto" ${prefs.autoNext?'checked':''}></div>`}${online&&!online.host?'':'<button class="action-button modal-action" id="resetTable">重置牌桌</button>'}`);
  $('#settingSound').onchange=e=>{prefs.sound=e.target.checked;initAudio();savePrefs();};
  $('#settingVolume').oninput=e=>{prefs.volume=Number(e.target.value);savePrefs();updateBgmVolume();};
  const audioInput=$('#allInAudioInput');
+ const musicSelect=$('#allInMusicSelect');
+ musicSelect.onchange=()=>{
+  const mode=musicSelect.value;
+  if(mode==='custom'&&!customAllIn){audioInput.click();return;}
+  prefs.allInMusic=mode;savePrefs();applyAllInTrackSource();updateAllInTrackLabel();
+ };
+ applyAllInTrackSource();updateAllInTrackLabel();
  $('#pickAllInAudio').onclick=()=>audioInput.click();
  audioInput.onchange=async()=>{
   const file=audioInput.files?.[0];if(!file)return;
-  try{await writeCustomAllIn(file);setText($('#allInTrackName'),file.name);toast(`全下音效已设为 ${file.name}`);}
+  try{await writeCustomAllIn(file);prefs.allInMusic='custom';savePrefs();if(musicSelect)musicSelect.value='custom';setText($('#allInTrackName'),file.name);toast(`全下音乐已设为 ${file.name}`);}
   catch{toast('这个音频无法保存，换一个文件试试');}
   audioInput.value='';
  };
- $('#clearAllInAudio').onclick=async()=>{await clearCustomAllIn();setText($('#allInTrackName'),'默认合成音效');toast('已恢复默认全下音效');};
+ $('#clearAllInAudio').onclick=async()=>{await clearCustomAllIn();prefs.allInMusic='kpl';savePrefs();if(musicSelect)musicSelect.value='kpl';applyAllInTrackSource();updateAllInTrackLabel();toast('已切换回我的音乐');};
  const settingAssist=$('#settingAssist');if(settingAssist)settingAssist.onchange=e=>setAssist(e.target.checked);
  if(!online){
   $('#settingSpeed').onchange=e=>{prefs.speed=Number(e.target.value);savePrefs();updateSpeed();};
@@ -812,6 +859,7 @@ function launchTable(){
  startHand();$('#homeButton').focus();
 }
 function initialize(){
+ applyAllInTrackSource();
  const dialog=document.getElementById('modal');
  $('#seatCount').value=Number.isInteger(prefs.seatCount)&&prefs.seatCount>=MIN_SEATS&&prefs.seatCount<=MAX_SEATS?prefs.seatCount:DEFAULT_SEATS;
  $('#turnSeconds').value=TURN_VALUES.includes(Number(prefs.turnSeconds))?String(prefs.turnSeconds):'30';
@@ -824,6 +872,7 @@ function initialize(){
  $('#launchGame').onclick=launchTable;
  if($('#resumeRoom'))$('#resumeRoom').onclick=()=>{if(!connecting)restoreSavedSession();};
  $('#joinGame').onclick=()=>{if(!connecting){rememberSetup();openMultiplayer('join');}};
+ $('#leaderboardButton').onclick=()=>openLeaderboard();
  if($('#resumeGame'))$('#resumeGame').onclick=()=>{if(!connecting){showTable();render();pump();$('#homeButton').focus();}};
  $('#homeButton').onclick=event=>{event.preventDefault();if(online)openMultiplayer();else showStart();};
  $('#advisorToggle').onclick=()=>setAssist(!prefs.assist);
@@ -887,7 +936,7 @@ function roomTitle(room){return `${room.seatCount} 人房 · ${room.code}${room.
 function applyRoom(state){
  if(!online||state.version<online.version)return;
  const changed=state.version!==online.version;
- Object.assign(online,{version:state.version,host:state.host,humans:state.humans,turnKey:state.turnKey,seatCount:state.seatCount??state.players.length,aiLevel:state.aiLevel??'normal',spectator:!!state.spectator,spectators:state.spectators||0,away:!!state.away,awayReason:state.awayReason||'',turnMs:state.turnMs||online.turnMs||TURN_LIMIT_MS});
+ Object.assign(online,{version:state.version,host:state.host,humans:state.humans,humanSeats:state.humanSeats||[],turnKey:state.turnKey,seatCount:state.seatCount??state.players.length,aiLevel:state.aiLevel??'normal',spectator:!!state.spectator,spectators:state.spectators||0,away:!!state.away,awayReason:state.awayReason||'',turnMs:state.turnMs||online.turnMs||TURN_LIMIT_MS});
  online.emoteCooldownAt=Date.now()+Math.max(0,state.emoteCooldown||0);
  const roomMeta=$('#roomMeta');if(roomMeta)setText(roomMeta,roomLine()+(online.host?' · 房主':'')+(online.spectator?' · 观战':'')+(online.away?' · AI 代打':''));
  if(!changed){setText($('#modeLabel'),roomTitle(online));return;}
@@ -971,21 +1020,51 @@ function invitedRoom(){
  const incoming=new URLSearchParams(location.hash.slice(1)).get('room')?.toUpperCase()||'';
  return /^[A-Z2-9]{8}$/.test(incoming)?incoming:'';
 }
+function invitedSeat(){
+ const params=new URLSearchParams(location.hash.slice(1));
+ const seat=Number(params.get('seat'));
+ return Number.isInteger(seat)&&seat>=0?seat:null;
+}
+async function copyText(value){
+ try{await navigator.clipboard.writeText(value);toast('链接已复制');}
+ catch{toast('复制失败，请手动选择链接');}
+}
+function seatInviteLink(seat){
+ const origin=(online?.inviteOrigin||location.origin).replace(/\/$/,'');
+ return `${origin}/#room=${online.code}&seat=${seat}`;
+}
 function openMultiplayer(mode='join'){
  if(online){
   const invite=`${(online.inviteOrigin||location.origin).replace(/\/$/,'')}/#room=${online.code}`;
-  openModal('房间',`<div class="room-code">${online.code}</div><p id="roomMeta">${roomLine()}${online.host?' · 房主':''}${online.spectator?' · 观战':''}</p><div class="ledger-actions"><button id="copyInvite" class="action-button primary">复制邀请</button>${online.spectator||online.away?'':`<button id="awayRoom" class="action-button">暂时离开</button>`}<button id="leaveRoom" class="action-button">${online.spectator?'离开观战':'彻底退出'}</button></div><p class="session-note">${online.spectator?'观战不占座，随时可以离开。':online.away?'当前座位由 AI 代打，点行动栏的「重新接管」可拿回；也可以彻底退出。':'暂时离开：座位交给 AI，保留重连凭证，可从首页「回到房间」或重新打开页面继续。</br>彻底退出：座位释放给 AI/其他玩家，凭证清除。'}</p><label class="field-label" for="inviteLink">邀请链接</label><input id="inviteLink" class="room-input" readonly>`);
+  const humanSeats=new Set(online.humanSeats||[]);
+  const hostPanel=online.host&&!online.spectator?`<div class="host-seat-manager"><h3>座位管理</h3>${game.players.map(player=>{
+   const human=humanSeats.has(player.id)||player.isHuman;
+   if(player.id===0)return `<div class="host-seat-row"><span>${player.id+1} 号 · ${lbEscape(player.name)}</span><span>你 · 房主</span></div>`;
+   return `<div class="host-seat-row"><span>${player.id+1} 号 · ${lbEscape(player.name)}</span><span class="host-seat-actions">${human?`<button type="button" class="text-button" data-kick-seat="${player.id}">踢出 → AI</button>`:`<button type="button" class="text-button" data-fill-seat="${player.id}">补/重置 AI</button><button type="button" class="text-button" data-seat-invite="${player.id}">换真人</button>`}</span></div>`;
+  }).join('')}<p class="session-note">踢出真人后该座位由 AI 接管；「换真人」会复制该 AI 座位的邀请链接，朋友打开后接替 AI 并以 2,000 买入。「补/重置 AI」把该 AI 恢复为 2,000 筹码。</p></div>`:'';
+  openModal('房间',`<div class="room-code">${online.code}</div><p id="roomMeta">${roomLine()}${online.host?' · 房主':''}${online.spectator?' · 观战':''}</p><div class="ledger-actions"><button id="copyInvite" class="action-button primary">复制邀请</button>${online.spectator||online.away?'':`<button id="awayRoom" class="action-button">暂时离开</button>`}<button id="leaveRoom" class="action-button">${online.spectator?'离开观战':'彻底退出'}</button></div><p class="session-note">${online.spectator?'观战不占座，随时可以离开。':online.away?'当前座位由 AI 代打，点行动栏的「重新接管」可拿回；也可以彻底退出。':'暂时离开：座位交给 AI，保留重连凭证，可从首页「回到房间」或重新打开页面继续。</br>彻底退出：座位释放给 AI/其他玩家，凭证清除。'}</p><label class="field-label" for="inviteLink">邀请链接</label><input id="inviteLink" class="room-input" readonly>${hostPanel}`);
   $('#inviteLink').value=invite;
   $('#copyInvite').onclick=async()=>{const input=$('#inviteLink');try{if(!navigator.clipboard?.writeText)throw Error('clipboard unavailable');await navigator.clipboard.writeText(input.value);}catch{input.focus();input.select();input.setSelectionRange?.(0,input.value.length);try{if(!document.execCommand('copy'))throw Error('copy failed');}catch{toast('请按 Ctrl/⌘+C 复制选中的链接');return;}}toast('邀请链接已复制');};
   $('#awayRoom')?.addEventListener('click',async()=>{if(await roomOp('away'))exitRoom(true);});
  $('#leaveRoom').onclick=async()=>{if(await roomOp('leave'))exitRoom();};
+  document.querySelectorAll('[data-kick-seat]').forEach(button=>button.onclick=async()=>{
+   const seat=Number(button.dataset.kickSeat),target=game.players.find(player=>player.id===seat);
+   openModal('踢出玩家？',`<p>把 ${lbEscape(target?.name||'该玩家')} 踢出，座位由 AI 接管。</p><div class="ledger-actions"><button id="confirmKick" class="action-button primary">确认踢出</button><button id="cancelKick" class="action-button">取消</button></div>`);
+   $('#cancelKick').onclick=()=>openMultiplayer();
+   $('#confirmKick').onclick=async()=>{if(await roomOp('kick',{seat})){toast('已踢出，座位由 AI 接管');openMultiplayer();}};
+  });
+  document.querySelectorAll('[data-fill-seat]').forEach(button=>button.onclick=async()=>{
+   const seat=Number(button.dataset.fillSeat);
+   if(await roomOp('fillAI',{seat})){toast('已补入新的 AI');openMultiplayer();}
+  });
+  document.querySelectorAll('[data-seat-invite]').forEach(button=>button.onclick=()=>copyText(seatInviteLink(Number(button.dataset.seatInvite))));
   return;
  }
  const join=mode==='join',options=setupOptions(),title=join?'加入房间':'创建房间',savedSession=readSession();
  openModal(title,`<form id="roomForm">${join&&savedSession?`<p class="session-note">上次的房间：<strong>${savedSession.code}</strong> <button type="button" class="small-link" id="resumeSavedRoom">重新接管上一局</button></p>`:''}${join?'':`<p class="session-note">${options.seatCount} 人桌 · ${levelLabels[options.aiLevel]} AI · 回合 ${turnLabel(options.turnSeconds*1000)}</p>`}<label class="field-label" for="playerNickname">昵称</label><input id="playerNickname" class="room-input" name="nickname" maxlength="12" autocomplete="nickname" required>${join?`<label class="field-label" for="roomCodeInput">房间码</label><input id="roomCodeInput" class="room-input" name="code" maxlength="8" autocapitalize="characters" spellcheck="false" value="${invitedRoom()}" required><div class="seat-pick" id="seatPick" hidden><div class="seat-pick-head">选择要接替的 AI 座位<small>新人固定重新买入 2,000</small></div><div id="seatPickList" class="seat-pick-list"></div></div><label class="spectate-check"><input type="checkbox" id="joinSpectate"> 只观战，不占座位</label>`:''}<p id="roomError" role="alert"></p><button class="action-button primary modal-action" id="roomSubmit">${title}</button></form>`);
  const form=$('#roomForm');
  $('#resumeSavedRoom')?.addEventListener('click',()=>{closeModal();restoreSavedSession();});
- let joinSeat=null;
+ let joinSeat=invitedSeat();
  const escapeName=value=>String(value).replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
  async function loadSeats(){
   if(!join)return;
