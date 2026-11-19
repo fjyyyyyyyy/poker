@@ -30,7 +30,7 @@ function clearSession(){
  try{sessionStorage.removeItem(SESSION_KEY);}catch{}
 }
 try{Object.assign(prefs,JSON.parse(localStorage.getItem('river-prefs')||'{}'));}catch{}
-let online=null,pollTimer=null,onlineBusy=false;
+let online=null,pollTimer=null,onlineBusy=false,reconnecting=false,reconnectAttempt=0;
 let game=new Game(),generation=0,busy=false,sideTab='live',raiseTo=40,previousActor=null,previousHand=0,previousStreet=null,toastTimer,audioContext,reviewViews=[];
 let launchMode='single',atTable=false,connecting=false;
 const workers=new Map();
@@ -881,6 +881,9 @@ function initialize(){
  $('#helpButton').onclick=openRules;$('#borrowButton').onclick=borrowChips;$('#repayButton').onclick=repayChips;$('#ledgerButton').onclick=openLedger;
  for(const id of ['#multiplayerButton','#multiplayerTopButton'])if($(id))$(id).onclick=()=>openMultiplayer();
  $('#closeModal').onclick=closeModal;
+ $('#reconnectButton').onclick=reconnectNow;
+ window.addEventListener('online',()=>{if(online)reconnectNow();});
+ document.addEventListener('visibilitychange',()=>{if(!document.hidden&&online)reconnectNow();});
  dialog.addEventListener('click',e=>{if(e.target===dialog){const r=dialog.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)closeModal();}});
  $$('[data-nav]').forEach(b=>b.onclick=()=>{const type=b.dataset.nav;if(type==='table'){closeModal();return;}({history:openHistory,players:openProfiles,leaderboard:openLeaderboard,settings:openSettings})[type]();});
  $$('[data-tab]').forEach(b=>b.onclick=()=>{sideTab=b.dataset.tab;$$('[data-tab]').forEach(x=>x.classList.toggle('selected',x===b));renderSide();});
@@ -958,7 +961,27 @@ async function roomRequest(path,body,token=online?.token){
  const response=await fetch('/api/rooms'+path,{method:body?'POST':'GET',headers:{...(body?{'Content-Type':'application/json'}:{}),...(token?{Authorization:'Bearer '+token}:{})},...(body?{body:JSON.stringify(body)}:{}),signal:AbortSignal.timeout(12000)});
  let data;try{data=await response.json();}catch{throw Error('房间服务暂时不可用');}if(!response.ok)throw Object.assign(Error(data.error||'连接失败'),{status:response.status,retry:!!data.retry});return data;
 }
+function setReconnectState(active, text='连接中断 · 正在重连…'){
+ reconnecting=!!active;
+ const button=$('#reconnectButton');
+ if(button)button.hidden=!active;
+ if(active)setText($('#modeLabel'),text);
+}
+function reconnectNow(){
+ if(!online)return;
+ clearTimeout(pollTimer);pollTimer=null;
+ if(reconnecting)setText($('#modeLabel'),'正在重新连接…');
+ pollRoom();
+}
+function markReconnectSuccess(){
+ if(!reconnecting)return;
+ reconnecting=false;reconnectAttempt=0;
+ const button=$('#reconnectButton');if(button)button.hidden=true;
+ if(online)setText($('#modeLabel'),roomTitle(online));
+ toast('连接已恢复');
+}
 function exitRoom(keepSession=false){
+ setReconnectState(false);reconnectAttempt=0;
  stopOnline(keepSession);
  if(invitedRoom())history.replaceState(null,'',location.pathname+location.search);
  newLocalTable(setupOptions());closeModal();setMode('multi');showStart();
@@ -966,19 +989,25 @@ function exitRoom(keepSession=false){
 async function pollRoom(){
  const session=online;
  if(!session)return;
+ pollTimer=null;
+ let delayMs=1000;
  try{
   if(!onlineBusy){
    const data=await roomRequest(`/${session.code}?since=${session.version}`);
    if(online===session){
     if(data.unchanged)setText($('#modeLabel'),roomTitle(session));
     else applyRoom(data.state);
+    markReconnectSuccess();
    }
   }
  }catch(error){
   if(online!==session)return;
   if(error.status===401||error.status===404){exitRoom();toast(error.message);return;}
-  $('#modeLabel').textContent='重连中…';
- }finally{if(online===session)pollTimer=setTimeout(pollRoom,1000);}
+  reconnectAttempt++;
+  setReconnectState(true);
+  delayMs=Math.min(6000,Math.round(700*Math.pow(1.7,Math.min(reconnectAttempt,5))));
+  setText($('#modeLabel'),`连接中断 · ${Math.ceil(delayMs/1000)} 秒后重试`);
+ }finally{if(online===session){clearTimeout(pollTimer);pollTimer=setTimeout(pollRoom,delayMs);}}
 }
 async function roomOp(op,extra={}){
  const session=online;
@@ -1000,6 +1029,7 @@ function enterRoom(data,code,inviteOrigin){
  showdownKey=data.state.phase==='complete'?`${data.state.sessionId}:${data.state.hand}`:'';
  hideShowdown();
  for(const key of [...workers.keys()])stopWorker(key);
+ setReconnectState(false);reconnectAttempt=0;
  online={code,token:data.token,version:-1,inviteOrigin:inviteOrigin||location.origin,spectator:!!data.spectator||!!data.state?.spectator,spectators:data.state?.spectators||0,away:!!data.state?.away,awayReason:data.state?.awayReason||'',turnMs:data.state?.turnMs||TURN_LIMIT_MS};
  writeSession({code,token:data.token,inviteOrigin:online.inviteOrigin});
  $('#advisorPanel').open=false;
