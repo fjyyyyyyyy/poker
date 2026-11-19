@@ -880,14 +880,41 @@ async function serveStatic(req, res, pathname) {
   } catch {
     throw new HttpError(404, 'Not Found');
   }
+  const ext = extname(filePath).toLowerCase();
+  const isMedia = ['.mp3', '.m4a', '.ogg', '.wav'].includes(ext);
+  const isText = ['.html', '.js', '.mjs', '.css', '.json', '.svg', '.md', '.txt'].includes(ext);
+  const acceptsGzip = String(req.headers['accept-encoding'] || '').includes('gzip');
   const headers = {
-    'Content-Type': MIME[extname(filePath).toLowerCase()] || 'application/octet-stream',
-    'Content-Length': data.length,
+    'Content-Type': MIME[ext] || 'application/octet-stream',
     'Cache-Control': 'no-cache',
-    'X-Content-Type-Options': 'nosniff'
+    'X-Content-Type-Options': 'nosniff',
+    'Accept-Ranges': 'bytes'
   };
-  res.writeHead(200, headers);
-  res.end(req.method === 'HEAD' ? undefined : data);
+  let body = data;
+  let status = 200;
+  if (isText && data.length > 1024 && acceptsGzip) {
+    body = gzipSync(data, { level: 6 });
+    headers['Content-Encoding'] = 'gzip';
+    headers['Vary'] = 'Accept-Encoding';
+  }
+  const range = req.headers.range;
+  if (range && isMedia && /^bytes=\d*-\d*$/.test(range)) {
+    const [startText, endText] = range.slice(6).split('-');
+    let start = startText ? Number(startText) : 0;
+    let end = endText ? Number(endText) : data.length - 1;
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || start >= data.length) {
+      res.writeHead(416, { ...headers, 'Content-Range': `bytes */${data.length}` });
+      res.end();
+      return;
+    }
+    end = Math.min(end, data.length - 1);
+    body = data.subarray(start, end + 1);
+    status = 206;
+    headers['Content-Range'] = `bytes ${start}-${end}/${data.length}`;
+  }
+  headers['Content-Length'] = body.length;
+  res.writeHead(status, headers);
+  res.end(req.method === 'HEAD' ? undefined : body);
 }
 
 async function handle(req, res) {

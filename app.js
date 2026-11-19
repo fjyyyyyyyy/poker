@@ -336,7 +336,7 @@ function applyAllInTrackSource(){
  const track=$('#allInTrack');if(!track)return;
  const mode=prefs.allInMusic==='default'?'default':'kpl';
  const source=ALL_IN_TRACKS[mode].src;
- if(!track.getAttribute('src')?.endsWith(source)){track.setAttribute('src',source);try{track.load();}catch{}}
+ if(!track.getAttribute('src')?.endsWith(source))track.setAttribute('src',source);
 }
 function updateAllInTrackLabel(){
  const label=$('#allInTrackName');

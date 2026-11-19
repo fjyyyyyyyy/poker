@@ -4,7 +4,7 @@ import {newPersonality} from './personality.js';
 import {BET_UNIT,ceilBet,isBet} from './bet.js';
 export const STREETS=['preflop','flop','turn','river'];
 export const STREET_NAMES={preflop:'翻牌前',flop:'翻牌',turn:'转牌',river:'河牌'};
-export const MIN_SEATS=2,DEFAULT_SEATS=6,MAX_SEATS=9;
+export const MIN_SEATS=2,DEFAULT_SEATS=6,MAX_SEATS=10;
 // 借款规则：每次借 2,000，累计欠款最多 10,000（5 次），还清后可再借。
 export const LOAN_AMOUNT=2000;
 export const MAX_DEBT=10000;
@@ -22,7 +22,8 @@ export const PERSONAS=[
  {name:'阿岚',en:'THE EXPLORER',style:'松活 · 好奇的读牌者',color:'#b1a2bd',loose:.41,aggression:.56,bluff:.2,trap:.18,adapt:.75,bio:'愿意用更多同花连张看翻牌，重视听牌潜力。遇到频繁诈唬的玩家，倾向用中等强度牌抓诈。'},
  {color:'#7faea9'},
  {color:'#cda38f'},
- {color:'#9fa77b'}
+ {color:'#9fa77b'},
+ {color:'#b7a2a8'}
 ];
 export class Game {
  constructor({stack=2000,sb=10,bb=20,random=secureRandom,excludeNames=[],seatCount=DEFAULT_SEATS,aiLevel=DEFAULT_AI_LEVEL}={}) {
