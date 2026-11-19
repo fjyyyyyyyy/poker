@@ -1,6 +1,7 @@
 import {Game,PERSONAS,STREET_NAMES,MIN_SEATS,MAX_SEATS,DEFAULT_SEATS,DEFAULT_AI_LEVEL,MAX_DEBT,LOAN_AMOUNT,BORROW_THRESHOLD,TURN_LIMIT_MS,FORCE_REPAY_AT} from './engine.js';
 import {BET_UNIT,snapBet} from './bet.js';
 import {EMOTES,EMOTE_COOLDOWN_MS} from './emotes.js';
+import {RoomChat} from './chat.js';
 import {SUITS,RANKS,suit,cardText} from './evaluator.js';
 const $=s=>document.querySelector(s),fmt=n=>Math.round(n).toLocaleString('en-US');
 const levelLabels={easy:'入门',normal:'标准',hard:'高手'};
@@ -31,6 +32,12 @@ function clearSession(){
 }
 try{Object.assign(prefs,JSON.parse(localStorage.getItem('river-prefs')||'{}'));}catch{}
 let online=null,pollTimer=null,onlineBusy=false,reconnecting=false,reconnectAttempt=0;
+const roomChat=new RoomChat({requestId:newRequestId,send:async payload=>{
+ const session=online;
+ if(!session)throw Error('请先加入房间');
+ const data=await roomRequest('/'+session.code,{op:'chat',...payload},session.token);
+ return data.chat;
+}});
 let game=new Game(),generation=0,busy=false,sideTab='live',raiseTo=40,previousActor=null,previousHand=0,previousStreet=null,toastTimer,audioContext,reviewViews=[];
 let launchMode='single',atTable=false,connecting=false;
 const workers=new Map();
@@ -666,7 +673,11 @@ function updateAdvisor(debounce=0){
 }
 function describe(e){if(e.kind==='blind')return e.label||'投入盲注';if(e.type==='fold')return '弃牌';if(e.type==='check'||e.type==='call'&&!e.amount)return '过牌';if(e.allin)return '全下';return e.type==='raise'?'加注至 '+fmt(e.to):'跟注';}
 function renderSide(){
+ if(sideTab==='chat'&&!online)sideTab='live';
+ roomChat.setSidebarTab(sideTab);
+ $$('[data-tab]').forEach(button=>button.classList.toggle('selected',button.dataset.tab===sideTab));
  if(!atTable||hiddenSidebar.matches)return;
+ if(sideTab==='chat')return;
  const side=$('#sideContent'),live=sideTab==='live';
  const markup=live?`<div class="hand-label"><b>第 ${game.hand} 手</b><span>${game.street?STREET_NAMES[game.street]:'准备开始'}</span></div>${game.events.length?`<ol class="activity-list">${game.events.slice(-18).map(e=>e.kind==='street'?`<li class="activity-street">${STREET_NAMES[e.street]} · ${e.board.map(cardText).join(' ')}</li>`:`<li class="activity-item"><span class="activity-avatar">${avatar(e.seat)}</span><div class="activity-text"><strong>${game.players[e.seat].name}</strong><p>${describe(e)}</p></div>${e.amount?`<span class="activity-amount">${fmt(e.amount)}</span>`:''}</li>`).join('')}${game.phase==='complete'?`<li class="activity-street">本手结束 · 底池 ${fmt(game.pot)}</li>`:''}</ol>`:'<div class="empty-activity">开局后，这里显示每个人的操作。</div>'}`:sessionHTML();
  if(markupCache.get(side)===markup)return;
@@ -836,6 +847,7 @@ function showTable(){
  startBgm();
 }
 function showStart(){
+ roomChat.toggle(false);
  atTable=false;$('#tableScreen').hidden=true;$('#startScreen').hidden=false;
  hideShowdown();
  const resume=$('#resumeGame');if(resume)resume.hidden=game.hand===0||!!online;
@@ -886,7 +898,7 @@ function initialize(){
  document.addEventListener('visibilitychange',()=>{if(!document.hidden&&online)reconnectNow();});
  dialog.addEventListener('click',e=>{if(e.target===dialog){const r=dialog.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)closeModal();}});
  $$('[data-nav]').forEach(b=>b.onclick=()=>{const type=b.dataset.nav;if(type==='table'){closeModal();return;}({history:openHistory,players:openProfiles,leaderboard:openLeaderboard,settings:openSettings})[type]();});
- $$('[data-tab]').forEach(b=>b.onclick=()=>{sideTab=b.dataset.tab;$$('[data-tab]').forEach(x=>x.classList.toggle('selected',x===b));renderSide();});
+ $$('[data-tab]').forEach(b=>b.onclick=()=>{sideTab=b.dataset.tab;renderSide();if(sideTab==='chat')roomChat.input.focus({preventScroll:true});});
  hiddenSidebar.addEventListener('change',renderSide);
  document.addEventListener('click',e=>{if(e.target.closest('#panelHistory'))openHistory();});
  document.addEventListener('pointerdown',()=>{if(atTable&&prefs.sound)startBgm();});
@@ -933,11 +945,12 @@ function openLedger(){
 }
 function cleanNickname(value){return String(value||'').replace(/[^\p{L}\p{N} _.-]/gu,'').trim().slice(0,12)||'玩家';}
 function newRequestId(){if(globalThis.crypto?.randomUUID)return crypto.randomUUID();const bytes=crypto.getRandomValues(new Uint8Array(16));return Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');}
-function stopOnline(keepSession=false){clearTimeout(pollTimer);stopCustomAllIn();clearLocalTurnTimer();turnDeadline=0;online=null;onlineBusy=false;if(!keepSession)clearSession();}
+function stopOnline(keepSession=false){clearTimeout(pollTimer);stopCustomAllIn();clearLocalTurnTimer();turnDeadline=0;online=null;onlineBusy=false;roomChat.setSession(null);if(!keepSession)clearSession();}
 function roomLine(){return `${online.humans} 位玩家 · ${online.seatCount-online.humans} 位 AI${online.spectators?` · ${online.spectators} 观战`:''} · ${levelLabels[online.aiLevel]} · 回合 ${turnLabel(online.turnMs||TURN_LIMIT_MS)}`;}
 function roomTitle(room){return `${room.seatCount} 人房 · ${room.code}${room.spectator?' · 观战':''}${room.away?' · AI 代打':''}`;}
 function applyRoom(state){
  if(!online||state.version<online.version)return;
+ roomChat.apply(state.chat);
  const changed=state.version!==online.version;
  Object.assign(online,{version:state.version,host:state.host,humans:state.humans,humanSeats:state.humanSeats||[],turnKey:state.turnKey,seatCount:state.seatCount??state.players.length,aiLevel:state.aiLevel??'normal',spectator:!!state.spectator,spectators:state.spectators||0,away:!!state.away,awayReason:state.awayReason||'',turnMs:state.turnMs||online.turnMs||TURN_LIMIT_MS});
  online.emoteCooldownAt=Date.now()+Math.max(0,state.emoteCooldown||0);
@@ -963,6 +976,7 @@ async function roomRequest(path,body,token=online?.token){
 }
 function setReconnectState(active, text='连接中断 · 正在重连…'){
  reconnecting=!!active;
+ roomChat.setConnected(!active);
  const button=$('#reconnectButton');
  if(button)button.hidden=!active;
  if(active)setText($('#modeLabel'),text);
@@ -976,6 +990,7 @@ function reconnectNow(){
 function markReconnectSuccess(){
  if(!reconnecting)return;
  reconnecting=false;reconnectAttempt=0;
+ roomChat.setConnected(true);
  const button=$('#reconnectButton');if(button)button.hidden=true;
  if(online)setText($('#modeLabel'),roomTitle(online));
  toast('连接已恢复');
@@ -993,8 +1008,9 @@ async function pollRoom(){
  let delayMs=1000;
  try{
   if(!onlineBusy){
-   const data=await roomRequest(`/${session.code}?since=${session.version}`);
+   const data=await roomRequest(`/${session.code}?since=${session.version}&chatSince=${roomChat.version}`);
    if(online===session){
+    roomChat.apply(data.chat);
     if(data.unchanged)setText($('#modeLabel'),roomTitle(session));
     else applyRoom(data.state);
     markReconnectSuccess();
@@ -1031,6 +1047,8 @@ function enterRoom(data,code,inviteOrigin){
  for(const key of [...workers.keys()])stopWorker(key);
  setReconnectState(false);reconnectAttempt=0;
  online={code,token:data.token,version:-1,inviteOrigin:inviteOrigin||location.origin,spectator:!!data.spectator||!!data.state?.spectator,spectators:data.state?.spectators||0,away:!!data.state?.away,awayReason:data.state?.awayReason||'',turnMs:data.state?.turnMs||TURN_LIMIT_MS};
+ roomChat.setSession({key:code+':'+data.token,code});
+ sideTab='chat';
  writeSession({code,token:data.token,inviteOrigin:online.inviteOrigin});
  $('#advisorPanel').open=false;
  suppressAllInFx=true;

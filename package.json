@@ -5,6 +5,8 @@
   "type": "module",
   "description": "River Room 德州练习室：单人练习 + 联网联机房间",
   "scripts": {
+    "build": "node scripts/check-build.mjs",
+    "test": "node --test tests/*.test.mjs",
     "start": "node server.mjs",
     "share": "node share.mjs"
   },
