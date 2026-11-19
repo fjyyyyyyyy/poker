@@ -19,7 +19,9 @@
  *   SHARE_TIMEOUT_MS=180000  等待公网地址的最长时间
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { dirname } from 'node:path';
+import { accessSync, constants, existsSync, readdirSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
@@ -29,6 +31,7 @@ const LOCAL = `http://127.0.0.1:${PORT}`;
 const INFO = `${LOCAL}/api/server-info`;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const WAIT_MS = Number(process.env.SHARE_TIMEOUT_MS) || 180000;
+const startedAt = Date.now();
 
 let serverChild = null;
 let tunnelChild = null;
@@ -155,7 +158,40 @@ async function startServerIfNeeded() {
   return false;
 }
 
+function isExecutable(path) {
+  try { accessSync(path, constants.X_OK); return true; } catch { return false; }
+}
+
+function cachedCloudflared() {
+  const home = homedir();
+  const names = process.platform === 'win32' ? ['cloudflared.exe'] : ['cloudflared'];
+  const direct = [
+    process.env.CLOUDFLARED,
+    ...names.map(name => join(ROOT, 'bin', name)),
+    ...names.map(name => join(home, '.cache', 'river-room', name))
+  ].filter(Boolean);
+  for (const path of direct) if (isExecutable(path)) return path;
+  // npx already downloaded cloudflared once; reuse that binary instead of resolving npm on every run.
+  const npxRoot = join(home, '.npm', '_npx');
+  if (existsSync(npxRoot)) {
+    try {
+      for (const entry of readdirSync(npxRoot)) {
+        for (const name of names) {
+          const path = join(npxRoot, entry, 'node_modules', 'cloudflared', 'bin', name);
+          if (isExecutable(path)) return path;
+        }
+      }
+    } catch { /* fall back to npx */ }
+  }
+  return '';
+}
+
 function tunnelCommand() {
+  const cached = cachedCloudflared();
+  if (cached) {
+    console.log('  使用已缓存的 cloudflared，跳过 npx 下载。');
+    return { command: cached, args: ['tunnel', '--url', LOCAL, '--no-autoupdate'] };
+  }
   const custom = process.env.CLOUDFLARED;
   if (custom && hasCommand(custom)) {
     return { command: custom, args: ['tunnel', '--url', LOCAL, '--no-autoupdate'] };
@@ -167,7 +203,8 @@ function tunnelCommand() {
     console.log('  没有找到 cloudflared，改用 npx 自动下载（首次运行会慢一点）…');
     return {
       command: process.platform === 'win32' ? 'npx.cmd' : 'npx',
-      args: ['--yes', 'cloudflared@0.7.3', 'tunnel', '--url', LOCAL, '--no-autoupdate']
+      args: ['--yes', 'cloudflared@0.7.3', 'tunnel', '--url', LOCAL, '--no-autoupdate'],
+      viaNpx: true
     };
   }
   return null;
@@ -193,7 +230,8 @@ async function main() {
   }
 
   console.log('  正在向 Cloudflare 申请公网地址…');
-  console.log('  首次运行需要下载 cloudflared/建立隧道，通常 20–90 秒，请耐心等待。');
+  if (tunnel.viaNpx) console.log('  首次运行需要下载 cloudflared，通常 20–90 秒；下载后再次运行通常几秒即可。');
+  else console.log('  已缓存客户端时通常 3–10 秒。');
   tunnelChild = spawn(tunnel.command, tunnel.args, {
     cwd: ROOT,
     env: process.env,
@@ -226,7 +264,7 @@ async function main() {
     clearInterval(progress);
     console.log('');
     console.log('  ────────────────────────────────────────────');
-    console.log('  公网地址：' + match[0]);
+    console.log('  公网地址：' + match[0] + `（耗时 ${((Date.now() - startedAt) / 1000).toFixed(1)} 秒）`);
     console.log('  ────────────────────────────────────────────');
     console.log('');
     if (OPEN) console.log('  正在自动打开建房页；若没有打开，请手动访问：' + match[0] + '/#host=1');

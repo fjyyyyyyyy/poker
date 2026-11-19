@@ -100,7 +100,7 @@ brew install cloudflared                              # macOS
 - **仍超时**：说明这台网络无法连接 Cloudflare 的 Quick Tunnel，常见于部分校园网/公司网络/运营商拦截。可以换手机热点、重跑一次，或改用云服务器部署。
 - **已经打印地址但页面 502**：本地游戏服务退出了；重新运行 `npm run share`，不要只重开浏览器。
 - **页面打不开但本地正常**：先确认终端窗口没有关闭，再用终端打印的 `https://....trycloudflare.com` 访问，不要用 127.0.0.1 发给外网朋友。
-- 已经下载过 `cloudflared` 后，第二次运行通常会快很多；也可以安装系统版：
+- 脚本会优先直接复用 npx 已缓存/系统已安装的 `cloudflared`，第二次运行通常 3–10 秒；也可以在系统里安装：
   ```bash
   brew install cloudflared       # macOS（若系统版本不受支持，继续用 npm run share 的 npx 下载即可）
   ```
