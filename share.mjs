@@ -292,70 +292,199 @@ async function main() {
     return;
   }
 
-  console.log('  正在向 Cloudflare 申请公网地址…');
-  if (tunnel.viaNpx) console.log('  首次运行需要下载 cloudflared，通常 20–90 秒；下载后再次运行通常几秒即可。');
-  else console.log('  已缓存客户端时通常 3–10 秒。');
-  tunnelChild = spawn(tunnel.command, tunnel.args, {
-    cwd: ROOT,
-    env: process.env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    detached: process.platform !== 'win32'
-  });
-  tunnelChild.on('exit', code => {
-    if (closing) return;
-    console.error(`\n  公网隧道已断开（code ${code}）。`);
-    if (tunnelTail) console.error('  最后输出：\n' + tunnelTail.split('\n').slice(-6).map(line => '    ' + line).join('\n'));
-    shutdown(1);
-  });
-  tunnelChild.on('error', error => {
-    console.error('\n  无法启动 cloudflared：' + error.message);
-    printInstallHelp();
-    shutdown(1);
-  });
-
-  let output = '';
+  try { unlinkSync(PUBLIC_ORIGIN_FILE); } catch { /* no stale origin */ }
+  let tunnelAttempt = 0;
   let announced = false;
   let progress = null;
-  const collect = chunk => {
-    const text = chunk.toString();
-    output = (output + text).slice(-8192);
-    tunnelTail = output;
-    if (announced) return;
-    const match = output.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/i);
-    if (!match) return;
+
+  async function verifyPublicUrl(url) {
+    // A trycloudflare hostname can be printed before its DNS record is live.
+    // Never tell the user it is ready until the URL actually serves the app.
+    let dnsFailures = 0;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      if (closing) return 'failed';
+      try {
+        const response = await fetch(url, { method: 'GET', cache: 'no-store', signal: AbortSignal.timeout(4000) });
+        if (response.ok) return 'ok';
+      } catch (error) {
+        const reason = String(error?.cause?.code || error?.cause?.message || error?.message || error?.code || '');
+        if (/ENOTFOUND|EAI_AGAIN|getaddrinfo/i.test(reason)) dnsFailures++;
+      }
+      if (dnsFailures >= 2) return 'dns';
+      await sleep(1100);
+    }
+    return 'failed';
+  }
+
+  function announce(url, provider = 'Cloudflare') {
+    if (announced || closing) return;
     announced = true;
-    publicUrl = match[0];
+    publicUrl = url;
     try { writeFileSync(PUBLIC_ORIGIN_FILE, publicUrl + '\n'); } catch { /* invite falls back to LAN */ }
     clearInterval(progress);
     console.log('');
     console.log('  ────────────────────────────────────────────');
-    console.log('  公网地址：' + match[0] + `（耗时 ${((Date.now() - startedAt) / 1000).toFixed(1)} 秒）`);
+    console.log(`  公网地址（${provider}）：` + url + `（耗时 ${((Date.now() - startedAt) / 1000).toFixed(1)} 秒）`);
     console.log('  ────────────────────────────────────────────');
     console.log('');
-    if (OPEN) console.log('  正在自动打开建房页；若没有打开，请手动访问：' + match[0] + '/#host=1');
-    else console.log('  打开下面地址建房：' + match[0] + '/#host=1');
+    if (OPEN) console.log('  正在自动打开建房页；若没有打开，请手动访问：' + url + '/#host=1');
+    else console.log('  打开下面地址建房：' + url + '/#host=1');
     console.log('  建房后点「房间」即可看到二维码；手机扫码，或把邀请链接发给朋友即可加入。');
     console.log('');
     console.log('  这个窗口需要一直开着；关闭、休眠或断网后链接失效。');
     console.log('  想给朋友一个固定地址，请部署到云服务器（见 README）。');
     console.log('');
-    if (OPEN) openWhenReady(match[0] + '/#host=1').catch(() => {});
-  };
-  tunnelChild.stdout.on('data', collect);
-  tunnelChild.stderr.on('data', collect);
+    if (OPEN) openWhenReady(url + '/#host=1').catch(() => {});
+  }
+
+  function launchLocalhostRun() {
+    if (closing || announced) return;
+    if (!hasCommand('ssh')) {
+      console.error('  没有找到 ssh，无法使用备用隧道。请安装 OpenSSH，或改用云服务器部署。');
+      shutdown(1);
+      return;
+    }
+    console.log('  正在通过 SSH 申请备用公网地址（localhost.run）…');
+    const child = spawn('ssh', [
+      '-o', 'BatchMode=yes',
+      '-o', 'StrictHostKeyChecking=accept-new',
+      '-o', 'ServerAliveInterval=30',
+      '-o', 'ExitOnForwardFailure=yes',
+      '-R', `80:localhost:${PORT}`,
+      'nokey@localhost.run'
+    ], {
+      cwd: ROOT,
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32'
+    });
+    tunnelChild = child;
+    let output = '';
+    let urlSeen = false;
+    const collect = chunk => {
+      output = (output + chunk.toString()).slice(-8192);
+      tunnelTail = output;
+      if (urlSeen || announced) return;
+      const match = output.match(/https:\/\/[a-z0-9-]+\.(?:app\.)?lhr\.life/i);
+      if (!match) return;
+      urlSeen = true;
+      const url = match[0];
+      console.log('  备用地址已分配，正在验证公网访问…');
+      verifyPublicUrl(url).then(status => {
+        if (closing) return;
+        if (status === 'ok') { announce(url, 'localhost.run 备用隧道'); return; }
+        console.error(`  备用地址无法访问：${url}`);
+        console.error('  这个网络可能同时屏蔽了 Cloudflare 和 localhost.run，建议把项目部署到云服务器。');
+        shutdown(1);
+      });
+    };
+    child.stdout.on('data', collect);
+    child.stderr.on('data', collect);
+    child.on('exit', code => {
+      if (closing || announced || urlSeen) return;
+      console.error(`\n  备用隧道已退出（code ${code}）。`);
+      if (tunnelTail) console.error(tunnelTail.split('\n').slice(-8).map(line => '    ' + line).join('\n'));
+      shutdown(1);
+    });
+    child.on('error', error => {
+      console.error('  备用隧道启动失败：' + error.message);
+      shutdown(1);
+    });
+  }
+
+  function launchTunnel() {
+    if (closing || announced) return;
+    tunnelAttempt++;
+    if (tunnelAttempt > 3) {
+      console.error('\n  Cloudflare 连续分配了无法访问的地址，切换到备用隧道 localhost.run…');
+      launchLocalhostRun();
+      return;
+    }
+    const tunnel = tunnelCommand();
+    if (!tunnel) {
+      printInstallHelp();
+      shutdown(1);
+      return;
+    }
+    console.log(tunnelAttempt === 1
+      ? '  正在向 Cloudflare 申请公网地址…'
+      : `  正在重新申请公网地址（第 ${tunnelAttempt}/3 次）…`);
+    if (tunnelAttempt === 1) {
+      if (tunnel.viaNpx) console.log('  首次运行需要下载 cloudflared，通常 20–90 秒；下载后再次运行通常几秒即可。');
+      else console.log('  已缓存客户端时通常 3–10 秒。');
+    }
+    const child = spawn(tunnel.command, tunnel.args, {
+      cwd: ROOT,
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32'
+    });
+    tunnelChild = child;
+    let output = '';
+    let urlSeen = false;
+    let killExpected = false;
+
+    const collect = chunk => {
+      const text = chunk.toString();
+      output = (output + text).slice(-8192);
+      tunnelTail = output;
+      if (urlSeen || announced) return;
+      const match = output.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/i);
+      if (!match) return;
+      urlSeen = true;
+      const url = match[0];
+      console.log('  地址已分配，正在验证公网访问…');
+      verifyPublicUrl(url).then(status => {
+        if (closing) return;
+        if (status === 'ok') { announce(url); return; }
+        killExpected = true;
+        try { child.kill('SIGTERM'); } catch {}
+        if (status === 'dns') {
+          console.error(`  地址解析失败（DNS NXDOMAIN）：${url}`);
+          console.error('  Cloudflare 当前分配的临时域名没有生效，直接切换备用隧道…');
+          setTimeout(launchLocalhostRun, 800);
+        } else {
+          console.error(`  地址无法访问：${url}，正在重新申请…`);
+          setTimeout(launchTunnel, 1000);
+        }
+      }).catch(error => {
+        console.error('  验证公网地址失败：', error.message);
+        killExpected = true;
+        try { child.kill('SIGTERM'); } catch {}
+        setTimeout(launchTunnel, 1000);
+      });
+    };
+    child.stdout.on('data', collect);
+    child.stderr.on('data', collect);
+    child.on('exit', code => {
+      if (closing || announced || killExpected || urlSeen) return;
+      console.error(`\n  公网隧道已退出（code ${code}）。`);
+      if (tunnelTail) console.error('  最后输出：\n' + tunnelTail.split('\n').slice(-8).map(line => '    ' + line).join('\n'));
+      if (tunnelAttempt < 3) setTimeout(launchTunnel, 1200);
+      else shutdown(1);
+    });
+    child.on('error', error => {
+      console.error('\n  无法启动 cloudflared：' + error.message);
+      printInstallHelp();
+      shutdown(1);
+    });
+  }
 
   progress = setInterval(() => {
     if (announced || closing) return;
-    console.log('  仍在等待公网地址…（首次下载 cloudflared 时可能需要 1–3 分钟）');
+    console.log('  仍在等待可用的公网地址…（首次下载 cloudflared 时可能需要 1–3 分钟）');
   }, 15000);
   setTimeout(() => {
     clearInterval(progress);
     if (announced || closing) return;
-    console.error(`\n  等了 ${Math.round(WAIT_MS / 1000)} 秒还没拿到公网地址，可能是网络无法连接 Cloudflare。`);
-    if (tunnelTail) console.error(tunnelTail.split('\n').slice(-8).map(line => '    ' + line).join('\n'));
-    console.error('  可以试着重跑一次；仍失败就安装 cloudflared，或改用云服务器部署（见 README）。');
+    console.error(`\n  等了 ${Math.round(WAIT_MS / 1000)} 秒还没拿到可用的公网地址。`);
+    if (tunnelTail) console.error(tunnelTail.split('\n').slice(-10).map(line => '    ' + line).join('\n'));
+    console.error('  可能原因：Cloudflare 分配了地址但 DNS 没生效，或当前网络无法访问 Cloudflare。');
+    console.error('  可以重跑一次、换手机热点，或改用云服务器/自有域名隧道。');
     shutdown(1);
   }, WAIT_MS);
+  launchTunnel();
+
 }
 
 main().catch(error => {
