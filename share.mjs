@@ -2,8 +2,8 @@
 /**
  * 一键公网联机助手
  *
- *   npm run share              # 启动、申请地址并自动打开建房页
- *   npm run share -- --no-open # 只启动并打印公网地址
+ *   npm run share              # 启动并打印公网地址
+ *   npm run share -- --open    # 启动、申请地址并自动打开浏览器
  *
  * 做三件事：
  *   1. 如果本机 8787 端口还没有游戏服务，先帮你启动 server.mjs
@@ -16,28 +16,20 @@
  * 环境变量：
  *   PORT=8787                 本地端口
  *   CLOUDFLARED=/path/to/bin  指定 cloudflared 可执行文件
- *   SHARE_TIMEOUT_MS=180000  等待公网地址的最长时间
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { accessSync, constants, existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
-let PORT = Number(process.env.PORT) || 8787;
-const OPEN = !process.argv.includes('--no-open');
-let LOCAL = `http://127.0.0.1:${PORT}`;
-let INFO = `${LOCAL}/api/server-info`;
+const PORT = Number(process.env.PORT) || 8787;
+const OPEN = process.argv.includes('--open');
+const LOCAL = `http://127.0.0.1:${PORT}`;
+const INFO = `${LOCAL}/api/server-info`;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-const WAIT_MS = Number(process.env.SHARE_TIMEOUT_MS) || 180000;
-const PUBLIC_ORIGIN_FILE = join(ROOT, '.public-origin');
-let publicUrl = '';
-const startedAt = Date.now();
 
 let serverChild = null;
 let tunnelChild = null;
-let serverRestarting = false;
 let closing = false;
 let tunnelTail = '';
 
@@ -57,9 +49,6 @@ function killTree(child) {
 function shutdown(code = 0) {
   if (closing) return;
   closing = true;
-  try {
-    if (publicUrl && readFileSync(PUBLIC_ORIGIN_FILE, 'utf8').trim() === publicUrl) unlinkSync(PUBLIC_ORIGIN_FILE);
-  } catch { /* nothing to clean */ }
   killTree(tunnelChild);
   if (serverChild) killTree(serverChild);
   setTimeout(() => process.exit(code), 250);
@@ -76,24 +65,10 @@ process.on('SIGHUP', () => {
   shutdown(0);
 });
 
-async function fetchServerInfo(port = PORT) {
-  try {
-    const response = await fetch(`http://127.0.0.1:${port}/api/server-info`, { signal: AbortSignal.timeout(1500) });
-    if (!response.ok) return null;
-    return await response.json();
-  } catch {
-    return null;
-  }
-}
-
 async function serverIsUp() {
-  return !!(await fetchServerInfo());
-}
-
-async function portHasService(port) {
   try {
-    await fetch(`http://127.0.0.1:${port}/api/server-info`, { signal: AbortSignal.timeout(600) });
-    return true;
+    const response = await fetch(INFO, { signal: AbortSignal.timeout(1500) });
+    return response.ok;
   } catch {
     return false;
   }
@@ -151,50 +126,10 @@ function printInstallHelp() {
   console.error('');
 }
 
-async function restartServerChild() {
-  if (serverRestarting || closing) return;
-  serverRestarting = true;
-  serverChild = null;
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    if (closing) return;
-    await sleep(800 * attempt);
-    console.log(`  游戏服务意外中断，正在自动恢复（第 ${attempt}/3 次）…`);
-    if (await startServerIfNeeded()) {
-      console.log('  游戏服务已自动恢复，房间会从持久化快照继续。');
-      serverRestarting = false;
-      return;
-    }
-  }
-  serverRestarting = false;
-  console.error('  游戏服务多次恢复失败，已停止公网隧道。');
-  shutdown(1);
-}
-
 async function startServerIfNeeded() {
-  const existing = await fetchServerInfo();
-  if (existing?.capabilities?.publicOrigin) {
-    console.log(`  检测到 ${LOCAL} 已在运行最新服务，直接建立公网隧道。`);
+  if (await serverIsUp()) {
+    console.log(`  检测到 ${LOCAL} 已在运行，直接建立公网隧道。`);
     return true;
-  }
-  if (existing) {
-    console.log(`  检测到 ${LOCAL} 是旧版/其他服务，不会复用它；正在另选端口启动最新版…`);
-    for (let candidate = PORT + 1; candidate < PORT + 20; candidate++) {
-      if (!(await portHasService(candidate))) {
-        PORT = candidate;
-        LOCAL = `http://127.0.0.1:${PORT}`;
-        INFO = `${LOCAL}/api/server-info`;
-        console.log(`  最新服务端口：${PORT}`);
-        break;
-      }
-    }
-    if (PORT === Number(process.env.PORT) || !(await portHasService(PORT))) {
-      // If all candidate checks were inconclusive, still try the next port.
-      if (PORT === Number(process.env.PORT)) {
-        PORT += 1;
-        LOCAL = `http://127.0.0.1:${PORT}`;
-        INFO = `${LOCAL}/api/server-info`;
-      }
-    }
   }
   console.log(`  启动游戏服务 ${LOCAL} …`);
   serverChild = spawn(process.execPath, ['server.mjs'], {
@@ -206,12 +141,9 @@ async function startServerIfNeeded() {
   for (let i = 0; i < 80; i++) {
     if (await serverIsUp()) {
       serverChild.on('exit', code => {
-        if (closing || serverRestarting) return;
+        if (closing) return;
         console.error(`  游戏服务意外退出（code ${code}）。`);
-        restartServerChild().catch(error => {
-          console.error('  自动恢复失败：', error.message);
-          shutdown(1);
-        });
+        shutdown(1);
       });
       return true;
     }
@@ -221,40 +153,7 @@ async function startServerIfNeeded() {
   return false;
 }
 
-function isExecutable(path) {
-  try { accessSync(path, constants.X_OK); return true; } catch { return false; }
-}
-
-function cachedCloudflared() {
-  const home = homedir();
-  const names = process.platform === 'win32' ? ['cloudflared.exe'] : ['cloudflared'];
-  const direct = [
-    process.env.CLOUDFLARED,
-    ...names.map(name => join(ROOT, 'bin', name)),
-    ...names.map(name => join(home, '.cache', 'river-room', name))
-  ].filter(Boolean);
-  for (const path of direct) if (isExecutable(path)) return path;
-  // npx already downloaded cloudflared once; reuse that binary instead of resolving npm on every run.
-  const npxRoot = join(home, '.npm', '_npx');
-  if (existsSync(npxRoot)) {
-    try {
-      for (const entry of readdirSync(npxRoot)) {
-        for (const name of names) {
-          const path = join(npxRoot, entry, 'node_modules', 'cloudflared', 'bin', name);
-          if (isExecutable(path)) return path;
-        }
-      }
-    } catch { /* fall back to npx */ }
-  }
-  return '';
-}
-
 function tunnelCommand() {
-  const cached = cachedCloudflared();
-  if (cached) {
-    console.log('  使用已缓存的 cloudflared，跳过 npx 下载。');
-    return { command: cached, args: ['tunnel', '--url', LOCAL, '--no-autoupdate'] };
-  }
   const custom = process.env.CLOUDFLARED;
   if (custom && hasCommand(custom)) {
     return { command: custom, args: ['tunnel', '--url', LOCAL, '--no-autoupdate'] };
@@ -266,8 +165,7 @@ function tunnelCommand() {
     console.log('  没有找到 cloudflared，改用 npx 自动下载（首次运行会慢一点）…');
     return {
       command: process.platform === 'win32' ? 'npx.cmd' : 'npx',
-      args: ['--yes', 'cloudflared@0.7.3', 'tunnel', '--url', LOCAL, '--no-autoupdate'],
-      viaNpx: true
+      args: ['--yes', 'cloudflared@0.7.3', 'tunnel', '--url', LOCAL, '--no-autoupdate']
     };
   }
   return null;
@@ -278,13 +176,6 @@ async function main() {
   console.log('  River Room · 公网联机助手');
   console.log('  ────────────────────────────────────────────');
 
-  if (!(await startServerIfNeeded())) {
-    console.error(`  游戏服务没能启动，请检查 ${PORT} 端口是否被占用。`);
-    console.error(`  换端口：PORT=8788 npm run share`);
-    shutdown(1);
-    return;
-  }
-
   const tunnel = tunnelCommand();
   if (!tunnel) {
     printInstallHelp();
@@ -292,258 +183,67 @@ async function main() {
     return;
   }
 
-  try { unlinkSync(PUBLIC_ORIGIN_FILE); } catch { /* no stale origin */ }
-  let tunnelAttempt = 0;
-  let announced = false;
-  let progress = null;
-
-  async function verifyPublicUrl(url) {
-    // A trycloudflare hostname can be printed before its DNS record is live.
-    // Never tell the user it is ready until the URL actually serves the app.
-    let dnsFailures = 0;
-    for (let attempt = 0; attempt < 5; attempt++) {
-      if (closing) return 'failed';
-      try {
-        const response = await fetch(url, { method: 'GET', cache: 'no-store', signal: AbortSignal.timeout(4000) });
-        if (response.ok) return 'ok';
-      } catch (error) {
-        const reason = String(error?.cause?.code || error?.cause?.message || error?.message || error?.code || '');
-        if (/ENOTFOUND|EAI_AGAIN|getaddrinfo/i.test(reason)) dnsFailures++;
-      }
-      if (dnsFailures >= 2) return 'dns';
-      await sleep(1100);
-    }
-    return 'failed';
+  if (!(await startServerIfNeeded())) {
+    console.error(`  游戏服务没能启动，请检查 ${PORT} 端口是否被占用。`);
+    console.error(`  换端口：PORT=8788 npm run share`);
+    shutdown(1);
+    return;
   }
 
-  function announce(url, provider = 'Cloudflare') {
-    if (announced || closing) return;
+  console.log('  正在向 Cloudflare 申请公网地址…');
+  tunnelChild = spawn(tunnel.command, tunnel.args, {
+    cwd: ROOT,
+    env: process.env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: process.platform !== 'win32'
+  });
+  tunnelChild.on('exit', code => {
+    if (closing) return;
+    console.error(`\n  公网隧道已断开（code ${code}）。`);
+    if (tunnelTail) console.error('  最后输出：\n' + tunnelTail.split('\n').slice(-6).map(line => '    ' + line).join('\n'));
+    shutdown(1);
+  });
+  tunnelChild.on('error', error => {
+    console.error('\n  无法启动 cloudflared：' + error.message);
+    printInstallHelp();
+    shutdown(1);
+  });
+
+  let output = '';
+  let announced = false;
+  const collect = chunk => {
+    const text = chunk.toString();
+    output = (output + text).slice(-8192);
+    tunnelTail = output;
+    if (announced) return;
+    const match = output.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/i);
+    if (!match) return;
     announced = true;
-    publicUrl = url;
-    try { writeFileSync(PUBLIC_ORIGIN_FILE, publicUrl + '\n'); } catch { /* invite falls back to LAN */ }
-    clearInterval(progress);
     console.log('');
     console.log('  ────────────────────────────────────────────');
-    console.log(`  公网地址（${provider}）：` + url + `（耗时 ${((Date.now() - startedAt) / 1000).toFixed(1)} 秒）`);
+    console.log('  公网地址：' + match[0]);
     console.log('  ────────────────────────────────────────────');
     console.log('');
-    if (OPEN) console.log('  正在自动打开建房页；若没有打开，请手动访问：' + url + '/#host=1');
-    else console.log('  打开下面地址建房：' + url + '/#host=1');
-    console.log('  建房后点「房间」即可看到二维码；手机扫码，或把邀请链接发给朋友即可加入。');
+    if (OPEN) console.log('  已自动用默认浏览器打开这个地址。');
+    console.log('  1. 用上面这个地址进入游戏（不要用 127.0.0.1，否则邀请链接会是内网地址）');
+    console.log('  2. 选择「联机牌桌 → 创建房间」，再点顶栏「房间」→「复制邀请」');
+    console.log('  3. 把邀请链接发给朋友，他们在外网也能直接加入');
     console.log('');
     console.log('  这个窗口需要一直开着；关闭、休眠或断网后链接失效。');
     console.log('  想给朋友一个固定地址，请部署到云服务器（见 README）。');
     console.log('');
-    if (OPEN) openWhenReady(url + '/#host=1').catch(() => {});
-  }
+    if (OPEN) openWhenReady(match[0]).catch(() => {});
+  };
+  tunnelChild.stdout.on('data', collect);
+  tunnelChild.stderr.on('data', collect);
 
-  function launchPinggy() {
-    if (closing || announced) return;
-    if (!hasCommand('ssh')) {
-      console.error('  没有找到 ssh，无法使用 Pinggy 备用隧道，尝试 localhost.run…');
-      launchLocalhostRun();
-      return;
-    }
-    console.log('  正在通过 SSH 申请 Pinggy 备用公网地址…');
-    const child = spawn('ssh', [
-      '-p', '443',
-      '-o', 'BatchMode=yes',
-      '-o', 'StrictHostKeyChecking=accept-new',
-      '-o', 'ServerAliveInterval=30',
-      '-o', 'ExitOnForwardFailure=yes',
-      '-R0:localhost:' + PORT,
-      'a.pinggy.io'
-    ], {
-      cwd: ROOT,
-      env: process.env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      detached: process.platform !== 'win32'
-    });
-    tunnelChild = child;
-    let output = '';
-    let urlSeen = false;
-    const collect = chunk => {
-      output = (output + chunk.toString()).slice(-8192);
-      tunnelTail = output;
-      if (urlSeen || announced) return;
-      const match = output.match(/https:\/\/[a-z0-9-]+\.(?:free\.pinggy\.net|run\.pinggy-free\.link)/i);
-      if (!match) return;
-      urlSeen = true;
-      const url = match[0];
-      console.log('  Pinggy 地址已分配，正在验证公网访问…');
-      verifyPublicUrl(url).then(status => {
-        if (closing) return;
-        if (status === 'ok') { announce(url, 'Pinggy 备用隧道'); return; }
-        console.error(`  Pinggy 地址无法访问：${url}，尝试 localhost.run…`);
-        try { child.kill('SIGTERM'); } catch {}
-        launchLocalhostRun();
-      }).catch(() => {
-        try { child.kill('SIGTERM'); } catch {}
-        launchLocalhostRun();
-      });
-    };
-    child.stdout.on('data', collect);
-    child.stderr.on('data', collect);
-    child.on('exit', code => {
-      if (closing || announced || urlSeen) return;
-      console.error(`\n  Pinggy 隧道已退出（code ${code}）。`);
-      if (tunnelTail) console.error(tunnelTail.split('\n').slice(-8).map(line => '    ' + line).join('\n'));
-      launchLocalhostRun();
-    });
-    child.on('error', error => {
-      console.error('  Pinggy 启动失败：' + error.message + '，尝试 localhost.run…');
-      launchLocalhostRun();
-    });
-  }
-
-  function launchLocalhostRun() {
-    if (closing || announced) return;
-    if (!hasCommand('ssh')) {
-      console.error('  没有找到 ssh，无法使用备用隧道。请安装 OpenSSH，或改用云服务器部署。');
-      shutdown(1);
-      return;
-    }
-    console.log('  正在通过 SSH 申请备用公网地址（localhost.run）…');
-    const child = spawn('ssh', [
-      '-o', 'BatchMode=yes',
-      '-o', 'StrictHostKeyChecking=accept-new',
-      '-o', 'ServerAliveInterval=30',
-      '-o', 'ExitOnForwardFailure=yes',
-      '-R', `80:localhost:${PORT}`,
-      'nokey@localhost.run'
-    ], {
-      cwd: ROOT,
-      env: process.env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      detached: process.platform !== 'win32'
-    });
-    tunnelChild = child;
-    let output = '';
-    let urlSeen = false;
-    const collect = chunk => {
-      output = (output + chunk.toString()).slice(-8192);
-      tunnelTail = output;
-      if (urlSeen || announced) return;
-      const match = output.match(/https:\/\/[a-z0-9-]+\.(?:app\.)?lhr\.life/i);
-      if (!match) return;
-      urlSeen = true;
-      const url = match[0];
-      console.log('  备用地址已分配，正在验证公网访问…');
-      verifyPublicUrl(url).then(status => {
-        if (closing) return;
-        if (status === 'ok') { announce(url, 'localhost.run 备用隧道'); return; }
-        console.error(`  备用地址无法访问：${url}`);
-        console.error('  这个网络可能同时屏蔽了 Cloudflare 和 localhost.run，建议把项目部署到云服务器。');
-        shutdown(1);
-      });
-    };
-    child.stdout.on('data', collect);
-    child.stderr.on('data', collect);
-    child.on('exit', code => {
-      if (closing || announced || urlSeen) return;
-      console.error(`\n  备用隧道已退出（code ${code}）。`);
-      if (tunnelTail) console.error(tunnelTail.split('\n').slice(-8).map(line => '    ' + line).join('\n'));
-      shutdown(1);
-    });
-    child.on('error', error => {
-      console.error('  备用隧道启动失败：' + error.message);
-      shutdown(1);
-    });
-  }
-
-  function launchTunnel() {
-    if (closing || announced) return;
-    tunnelAttempt++;
-    if (tunnelAttempt > 3) {
-      console.error('\n  Cloudflare 连续分配了无法访问的地址，切换到备用隧道 Pinggy…');
-      launchPinggy();
-      return;
-    }
-    const tunnel = tunnelCommand();
-    if (!tunnel) {
-      printInstallHelp();
-      shutdown(1);
-      return;
-    }
-    console.log(tunnelAttempt === 1
-      ? '  正在向 Cloudflare 申请公网地址…'
-      : `  正在重新申请公网地址（第 ${tunnelAttempt}/3 次）…`);
-    if (tunnelAttempt === 1) {
-      if (tunnel.viaNpx) console.log('  首次运行需要下载 cloudflared，通常 20–90 秒；下载后再次运行通常几秒即可。');
-      else console.log('  已缓存客户端时通常 3–10 秒。');
-    }
-    const child = spawn(tunnel.command, tunnel.args, {
-      cwd: ROOT,
-      env: process.env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      detached: process.platform !== 'win32'
-    });
-    tunnelChild = child;
-    let output = '';
-    let urlSeen = false;
-    let killExpected = false;
-
-    const collect = chunk => {
-      const text = chunk.toString();
-      output = (output + text).slice(-8192);
-      tunnelTail = output;
-      if (urlSeen || announced) return;
-      const match = output.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/i);
-      if (!match) return;
-      urlSeen = true;
-      const url = match[0];
-      console.log('  地址已分配，正在验证公网访问…');
-      verifyPublicUrl(url).then(status => {
-        if (closing) return;
-        if (status === 'ok') { announce(url); return; }
-        killExpected = true;
-        try { child.kill('SIGTERM'); } catch {}
-        if (status === 'dns') {
-          console.error(`  地址解析失败（DNS NXDOMAIN）：${url}`);
-          console.error('  Cloudflare 当前分配的临时域名没有生效，直接切换备用隧道…');
-          setTimeout(launchPinggy, 800);
-        } else {
-          console.error(`  地址无法访问：${url}，正在重新申请…`);
-          setTimeout(launchTunnel, 1000);
-        }
-      }).catch(error => {
-        console.error('  验证公网地址失败：', error.message);
-        killExpected = true;
-        try { child.kill('SIGTERM'); } catch {}
-        setTimeout(launchTunnel, 1000);
-      });
-    };
-    child.stdout.on('data', collect);
-    child.stderr.on('data', collect);
-    child.on('exit', code => {
-      if (closing || announced || killExpected || urlSeen) return;
-      console.error(`\n  公网隧道已退出（code ${code}）。`);
-      if (tunnelTail) console.error('  最后输出：\n' + tunnelTail.split('\n').slice(-8).map(line => '    ' + line).join('\n'));
-      if (tunnelAttempt < 3) setTimeout(launchTunnel, 1200);
-      else shutdown(1);
-    });
-    child.on('error', error => {
-      console.error('\n  无法启动 cloudflared：' + error.message);
-      printInstallHelp();
-      shutdown(1);
-    });
-  }
-
-  progress = setInterval(() => {
-    if (announced || closing) return;
-    console.log('  仍在等待可用的公网地址…（首次下载 cloudflared 时可能需要 1–3 分钟）');
-  }, 15000);
   setTimeout(() => {
-    clearInterval(progress);
     if (announced || closing) return;
-    console.error(`\n  等了 ${Math.round(WAIT_MS / 1000)} 秒还没拿到可用的公网地址。`);
-    if (tunnelTail) console.error(tunnelTail.split('\n').slice(-10).map(line => '    ' + line).join('\n'));
-    console.error('  可能原因：Cloudflare 分配了地址但 DNS 没生效，或当前网络无法访问 Cloudflare。');
-    console.error('  可以重跑一次、换手机热点，或改用云服务器/自有域名隧道。');
+    console.error('\n  等了 60 秒还没拿到公网地址，可能是网络无法连接 Cloudflare。');
+    if (tunnelTail) console.error(tunnelTail.split('\n').slice(-8).map(line => '    ' + line).join('\n'));
+    console.error('  如果所在网络访问 Cloudflare 不稳定，建议改用云服务器部署（见 README）。');
     shutdown(1);
-  }, WAIT_MS);
-  launchTunnel();
-
+  }, 60000);
 }
 
 main().catch(error => {

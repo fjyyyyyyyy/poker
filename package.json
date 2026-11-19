@@ -1,6 +1,6 @@
 {
   "name": "river-room",
-  "version": "1.1.11",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "description": "River Room 德州练习室：单人练习 + 联网联机房间",

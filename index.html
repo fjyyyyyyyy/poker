@@ -4,10 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#122923">
-  <meta name="description" content="River Room 德州练习室。支持单人练习与联网联机，2–10 人桌，可与朋友在同一房间同桌竞技。">
+  <meta name="description" content="River Room 德州练习室。支持单人练习与联网联机，2–9 人桌，可与朋友在同一房间同桌竞技。">
   <title>River Room · 德州练习室</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23162e27'/%3E%3Ctext x='32' y='47' text-anchor='middle' font-size='46' fill='%23d8bb7b'%3E♠%3C/text%3E%3C/svg%3E">
-  <link rel="stylesheet" href="style.css?v=31">
+  <link rel="stylesheet" href="style.css?v=30">
 </head>
 <body>
   <div class="start-screen" id="startScreen">
@@ -57,7 +57,6 @@
               <option value="7">7 人</option>
               <option value="8">8 人</option>
               <option value="9">9 人</option>
-              <option value="10">10 人</option>
             </select>
           </label>
           <label for="aiLevel">AI 强度
@@ -86,7 +85,6 @@
           <button class="launch-button" id="launchGame" type="button">开始游戏</button>
           <button class="join-button" id="joinGame" type="button" hidden>加入房间</button>
           <button class="join-button" id="resumeGame" type="button" hidden>继续牌局</button>
-          <button class="join-button" id="leaderboardButton" type="button">排行榜</button>
           <button class="join-button" id="resumeRoom" type="button" hidden>回到房间</button>
         </div>
       </section>
@@ -100,7 +98,6 @@
         <button class="rail-button active" title="牌桌" aria-label="牌桌" data-nav="table"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="18" height="12" rx="6"/><path d="M8 10h8m-8 4h8"/></svg><span class="nav-label">牌桌</span></button>
         <button class="rail-button" title="手牌记录" aria-label="手牌记录" data-nav="history"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6m-6 4h6m-6 4h4"/></svg><span class="nav-label">记录</span></button>
         <button class="rail-button" title="对手" aria-label="对手" data-nav="players"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21v-2a8 8 0 0 1 16 0v2"/></svg><span class="nav-label">对手</span></button>
-        <button class="rail-button" title="排行榜" aria-label="排行榜" data-nav="leaderboard"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 21h8m-4-5v5M6 3h12v5a6 6 0 0 1-12 0V3ZM6 5H3v2a4 4 0 0 0 5 4m10-6h3v2a4 4 0 0 1-5 4"/></svg><span class="nav-label">排行</span></button>
       </div>
       <button class="rail-button" title="设置" aria-label="设置" data-nav="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h2m6 0h8M4 17h8m6 0h2"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></svg><span class="nav-label">设置</span></button>
     </aside>
@@ -112,7 +109,6 @@
         </div>
         <div class="top-status">
           <span id="modeLabel">6 人桌 · 标准</span>
-          <button class="top-multiplayer" id="reconnectButton" type="button" hidden>重连</button>
           <button class="top-multiplayer" id="multiplayerTopButton" type="button" hidden>房间</button>
           <button class="advisor-toggle" id="advisorToggle" type="button" aria-pressed="false">AI 辅助</button>
           <button class="icon-button" id="soundToggle" type="button" aria-label="开启音效" title="音效">♪<span>音效关</span></button>
@@ -169,7 +165,7 @@
       </main>
     </div>
   </div>
-  <audio id="bgm" loop preload="none"><source src="bgm.m4a" type="audio/mp4"><source src="bgm.mp3" type="audio/mpeg"></audio>
+  <audio id="bgm" src="bgm.mp3" loop preload="metadata"></audio>
   <audio id="allInTrack" src="allin.mp3" preload="none" loop></audio>
   <div class="all-in-fx" id="allInFx" aria-hidden="true">
     <div class="all-in-rays"></div>
@@ -196,6 +192,6 @@
     <div id="modalBody"></div>
   </dialog>
   <div class="toast" id="toast" role="status"></div>
-  <script type="module" src="app.js?v=44"></script>
+  <script type="module" src="app.js?v=47"></script>
 </body>
 </html>

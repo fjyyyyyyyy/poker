@@ -6,7 +6,3 @@ npm-debug.log*
 *.zip
 启动联机.app
 启动联机.command
-
-.leaderboard.json
-
-.rooms.json

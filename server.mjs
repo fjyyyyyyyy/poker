@@ -14,8 +14,7 @@
  * 房间数据保存在内存里，进程重启即清空。
  */
 import { createServer } from 'node:http';
-import { readFile, rename, writeFile } from 'node:fs/promises';
-import { renameSync, writeFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { gzipSync } from 'node:zlib';
 import { randomBytes } from 'node:crypto';
 import { networkInterfaces } from 'node:os';
@@ -24,12 +23,8 @@ import { fileURLToPath } from 'node:url';
 import { Game, AI_LEVELS, MIN_SEATS, MAX_SEATS, TURN_LIMIT_MS } from './engine.js';
 import { EMOTES, EMOTE_COOLDOWN_MS } from './emotes.js';
 import { decide } from './ai.js';
-import { evaluate } from './evaluator.js';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
-const LEADERBOARD_FILE = resolve(ROOT, '.leaderboard.json');
-const PUBLIC_ORIGIN_FILE = resolve(ROOT, '.public-origin');
-const ROOMS_FILE = process.env.ROOMS_FILE ? resolve(process.env.ROOMS_FILE) : resolve(ROOT, '.rooms.json');
 const PORT = Number(process.env.PORT) || 8787;
 const HOST = process.env.HOST || '0.0.0.0';
 
@@ -40,6 +35,7 @@ const THINK_SPREAD_MS = 900;  // AI 思考时间抖动
 const TURN_MS = TURN_LIMIT_MS; // 默认回合时限；每个房间可在创建时覆盖
 const TURN_OPTIONS = [15, 30, 45, 60, 120, 300]; // 秒
 const DISCONNECT_MS = 30000;   // 30 秒没有轮询：AI 代打，但保留 token，回来可自动重连
+const AFK_MS = 60000;          // 60 秒没有任何用户操作：视为人不在，AI 代打
 const IDLE_TTL_MS = 30 * 60 * 1000;
 const MAX_TTL_MS = 12 * 60 * 60 * 1000;
 const HISTORY_IN_STATE = 6;   // 每次下发最近几手牌（完整历史仍留在服务端）
@@ -69,10 +65,6 @@ const MIME = {
 };
 
 const rooms = new Map();
-let recentLeaderboard = [];
-let saveRoomsTimer = null;
-let roomsSaving = false;
-let roomsDirty = false;
 
 class HttpError extends Error {
   constructor(status, message, extra = {}) {
@@ -146,7 +138,7 @@ function createRoom({ name, seatCount, aiLevel, turnSeconds = 30 }) {
     nextDealAt: 0,
     aiMemory: {},
     emoteCooldowns: {},
-    pendingSwaps: [],
+    kicked: new Set(),
     recent: new Map(),      // token:requestId -> 时间，用于请求去重
     createdAt: Date.now(),
     lastActivity: Date.now()
@@ -162,7 +154,7 @@ function addHuman(room, seat, name) {
   const player = room.game.players[seat];
   player.name = name;
   player.isHuman = true;
-  room.humans.set(token, { seat, name, joinedAt: Date.now(), lastSeen: Date.now() });
+  room.humans.set(token, { seat, name, joinedAt: Date.now(), lastSeen: Date.now(), lastActive: Date.now() });
   return token;
 }
 
@@ -184,7 +176,7 @@ function markAway(room, seat, reason) {
     const next = [...room.humans.values()].filter(item => !item.away).sort((a, b) => a.joinedAt - b.joinedAt)[0];
     if (next) room.hostSeat = next.seat;
   }
-  const label = reason === 'timeout' ? '回合超时' : reason === 'manual' ? '暂时离开' : '掉线';
+  const label = reason === 'timeout' ? '回合超时' : reason === 'manual' ? '暂时离开' : reason === 'afk' ? '1 分钟未操作' : '掉线';
   console.log(`[river] ${human.name} ${label}，AI 代打座位 ${seat}（保留重连）`);
   bump(room);
   return true;
@@ -195,6 +187,7 @@ function reclaimHuman(room, human) {
   human.away = false;
   human.awayReason = null;
   human.lastSeen = Date.now();
+  human.lastActive = Date.now();
   const player = room.game.players[human.seat];
   if (player) player.isHuman = true;
   const host = [...room.humans.values()].find(item => item.seat === room.hostSeat);
@@ -211,7 +204,6 @@ function removeHuman(room, token) {
   if (player) player.isHuman = false;
   if (room.humans.size === 0) {
     rooms.delete(room.code);
-    scheduleSaveRooms();
     return;
   }
   if (room.hostSeat === human.seat) {
@@ -219,194 +211,6 @@ function removeHuman(room, token) {
     room.hostSeat = next.seat;
   }
   bump(room);
-}
-
-function gameSnapshot(game) {
-  const { random, ...data } = game;
-  return data;
-}
-
-function roomSnapshot(room) {
-  return {
-    code: room.code,
-    game: gameSnapshot(room.game),
-    humans: [...room.humans.entries()],
-    spectators: [...room.spectators.entries()],
-    recent: [...room.recent.entries()],
-    hostSeat: room.hostSeat,
-    turnMs: room.turnMs,
-    version: room.version,
-    turnKey: room.turnKey,
-    aiMemory: room.aiMemory,
-    emoteCooldowns: room.emoteCooldowns,
-    pendingSwaps: room.pendingSwaps,
-    createdAt: room.createdAt,
-    lastActivity: room.lastActivity,
-    lastLeaderboardKey: room.lastLeaderboardKey
-  };
-}
-
-function restoreGame(data) {
-  if (!data || !Array.isArray(data.players) || data.players.length < 2) return null;
-  const game = new Game({ seatCount: data.players.length, aiLevel: data.aiLevel || 'normal', stack: data.buyin || 2000 });
-  Object.assign(game, data);
-  return game;
-}
-
-function restoreRoom(data) {
-  if (!data || typeof data.code !== 'string') return null;
-  const game = restoreGame(data.game);
-  if (!game) return null;
-  const room = {
-    code: data.code,
-    game,
-    turnMs: data.turnMs || 30000,
-    version: Number.isFinite(data.version) ? data.version : 0,
-    humans: new Map(Array.isArray(data.humans) ? data.humans : []),
-    spectators: new Map(Array.isArray(data.spectators) ? data.spectators : []),
-    hostSeat: Number.isInteger(data.hostSeat) ? data.hostSeat : 0,
-    turnKey: typeof data.turnKey === 'string' ? data.turnKey : '',
-    actorSince: Date.now(),
-    nextThinkAt: 0,
-    nextDealAt: 0,
-    aiMemory: data.aiMemory && typeof data.aiMemory === 'object' ? data.aiMemory : {},
-    emoteCooldowns: data.emoteCooldowns && typeof data.emoteCooldowns === 'object' ? data.emoteCooldowns : {},
-    pendingSwaps: Array.isArray(data.pendingSwaps) ? data.pendingSwaps : [],
-    recent: new Map(Array.isArray(data.recent) ? data.recent : []),
-    createdAt: Number.isFinite(data.createdAt) ? data.createdAt : Date.now(),
-    lastActivity: Date.now(),
-    lastLeaderboardKey: data.lastLeaderboardKey
-  };
-  for (const human of room.humans.values()) {
-    if (!human.away) human.lastSeen = Date.now();
-  }
-  room.version = (room.version || 0) + 1;
-  room.turnKey = `${game.sessionId}.${game.hand}.${game.events.length}.${game.actor ?? '-'}`;
-  return room;
-}
-
-async function loadRooms() {
-  let parsed;
-  try {
-    parsed = JSON.parse(await readFile(ROOMS_FILE, 'utf8'));
-  } catch {
-    return;
-  }
-  if (!Array.isArray(parsed)) return;
-  const now = Date.now();
-  for (const item of parsed) {
-    try {
-      if (!item || now - Number(item.lastActivity) > IDLE_TTL_MS || now - Number(item.createdAt) > MAX_TTL_MS) continue;
-      const room = restoreRoom(item);
-      if (room && !rooms.has(room.code)) rooms.set(room.code, room);
-    } catch (error) {
-      console.warn('[river] 恢复房间失败：', error.message);
-    }
-  }
-  if (rooms.size) console.log(`[river] 已恢复 ${rooms.size} 个房间`);
-}
-
-function scheduleSaveRooms() {
-  roomsDirty = true;
-  if (saveRoomsTimer) return;
-  saveRoomsTimer = setTimeout(() => {
-    saveRoomsTimer = null;
-    flushRooms().catch(error => console.error('[river] 保存房间失败：', error.message));
-  }, 180);
-  saveRoomsTimer.unref?.();
-}
-
-async function flushRooms() {
-  if (roomsSaving) { roomsDirty = true; return; }
-  if (!roomsDirty) return;
-  roomsSaving = true;
-  roomsDirty = false;
-  try {
-    const tempFile = `${ROOMS_FILE}.tmp`;
-    const payload = JSON.stringify([...rooms.values()].map(roomSnapshot));
-    await writeFile(tempFile, payload);
-    await rename(tempFile, ROOMS_FILE);
-  } catch (error) {
-    roomsDirty = true;
-    throw error;
-  } finally {
-    roomsSaving = false;
-    if (roomsDirty && !saveRoomsTimer) scheduleSaveRooms();
-  }
-}
-
-async function loadLeaderboard() {
- try {
-  const parsed = JSON.parse(await readFile(LEADERBOARD_FILE, 'utf8'));
-  if (Array.isArray(parsed)) recentLeaderboard = parsed.filter(entry => entry && Number.isFinite(entry.at));
- } catch { recentLeaderboard = []; }
-}
-
-function saveLeaderboard() {
- writeFile(LEADERBOARD_FILE, JSON.stringify(recentLeaderboard)).catch(() => {});
-}
-
-function recordLeaderboard(room) {
- const game = room.game;
- if (game.phase !== 'complete' || !game.result) return;
- const key = `${game.sessionId}:${game.hand}`;
- if (room.lastLeaderboardKey === key) return;
- room.lastLeaderboardKey = key;
- const isHuman = id => !!game.players[id]?.isHuman;
- const revealed = new Map((game.result.revealed || []).map(entry => [entry.id, entry]));
- const board = [...game.board];
- const at = Date.now();
- const detailFor = (winnerId, entry, amount) => {
-  const winner = game.players[winnerId];
-  return {
-   winner: { name: winner.name, seat: winnerId + 1, isHuman: isHuman(winnerId) },
-   hand: entry?.hand || '未摊牌', amount, pot: game.result.total, board,
-   hole: entry?.hole || [],
-   players: game.players.map((player, id) => ({
-    name: player.name, seat: id + 1, isHuman: isHuman(id), folded: player.folded,
-    hole: revealed.get(id)?.hole || [], hand: revealed.get(id)?.hand || null, stack: player.stack
-   })),
-   winners: (game.result.winningSeats || []).map(id => ({ name: game.players[id].name, seat: id + 1, amount: game.result.contestAwards[id] || 0 }))
-  };
- };
- const entries = [];
- for (const winnerId of game.result.winningSeats || []) {
-  if (!isHuman(winnerId)) continue;
-  const amount = game.result.contestAwards[winnerId] || 0;
-  if (amount <= 0) continue;
-  const entry = revealed.get(winnerId);
-  entries.push({
-   id: `win:${game.sessionId}:${game.hand}:${winnerId}`, kind: 'win', amount, score: amount, at,
-   winner: game.players[winnerId].name, hand: entry?.hand || '未摊牌',
-   board, hole: entry?.hole || [], detail: detailFor(winnerId, entry, amount)
-  });
- }
- let best = null;
- for (const entry of game.result.revealed || []) {
-  if (!isHuman(entry.id)) continue;
-  const ranked = evaluate([...entry.hole, ...game.board]);
-  if (!best || ranked.score > best.score) best = { ...entry, name: ranked.name, score: ranked.score };
- }
- if (best) {
-  const amount = game.result.contestAwards[best.id] || 0;
-  entries.push({
-   id: `hand:${game.sessionId}:${game.hand}`, kind: 'hand', amount, score: best.score, at,
-   winner: game.players[best.id].name, hand: best.name,
-   board, hole: best.hole || [], detail: detailFor(best.id, best, amount)
-  });
- }
- if (!entries.length) return;
- const seen = new Set(recentLeaderboard.map(entry => entry.id));
- recentLeaderboard.push(...entries.filter(entry => !seen.has(entry.id)));
- const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
- recentLeaderboard = recentLeaderboard.filter(entry => entry.at >= cutoff).slice(-500);
- saveLeaderboard();
-}
-
-function leaderboardPayload() {
- const by = (kind, field) => recentLeaderboard.filter(entry => entry.kind === kind)
-  .sort((a, b) => (b[field] || 0) - (a[field] || 0) || b.at - a.at).slice(0, 10);
- return { wins: by('win', 'amount'), hands: by('hand', 'score'), updatedAt: Date.now() };
 }
 
 function bump(room) {
@@ -417,7 +221,6 @@ function bump(room) {
   room.nextThinkAt = 0;
   room.nextDealAt = 0;
   room.lastActivity = Date.now();
- recordLeaderboard(room);
 }
 
 function pickJoinSeat(room) {
@@ -467,27 +270,6 @@ function seatHuman(room, seat, name) {
   player.stats = { hands: 0, vpip: 0, pfr: 0, raises: 0, calls: 0, folds: 0, faced: 0, foldToBet: 0, showdowns: 0, shownBluffs: 0 };
 }
 
-function swapSeatState(room, a, b) {
-  const game = room.game;
-  if (!Number.isInteger(a) || !Number.isInteger(b) || a === b) return false;
-  if (a < 0 || b < 0 || a >= game.players.length || b >= game.players.length) return false;
-  [game.players[a], game.players[b]] = [game.players[b], game.players[a]];
-  game.players[a].id = a;
-  game.players[b].id = b;
-  if (Array.isArray(game.personalities)) {
-    [game.personalities[a], game.personalities[b]] = [game.personalities[b], game.personalities[a]];
-  }
-  for (const human of room.humans.values()) {
-    if (human.seat === a) human.seat = b;
-    else if (human.seat === b) human.seat = a;
-  }
-  if (room.hostSeat === a) room.hostSeat = b;
-  else if (room.hostSeat === b) room.hostSeat = a;
-  [room.aiMemory[a], room.aiMemory[b]] = [room.aiMemory[b], room.aiMemory[a]];
-  [room.emoteCooldowns[a], room.emoteCooldowns[b]] = [room.emoteCooldowns[b], room.emoteCooldowns[a]];
-  return true;
-}
-
 function resetGame(room) {
   const humans = [...room.humans.values()];
   const { seatCount, aiLevel } = room.game;
@@ -502,7 +284,7 @@ function resetGame(room) {
   room.game = game;
   room.aiMemory = {};
   room.emoteCooldowns = {};
-  room.pendingSwaps = [];
+  room.kicked.clear();
   room.recent.clear();
 }
 
@@ -527,9 +309,9 @@ function buildState(room, seat, spectator = false) {
   const players = new Array(count);
   for (let i = 0; i < count; i++) {
     const player = game.players[i];
+    const humanSeat = [...room.humans.values()].find(human => human.seat === i);
     players[map(i)] = {
       id: map(i),
-      absoluteSeat: i,
       name: player.name,
       stack: player.stack,
       debt: player.debt,
@@ -543,6 +325,8 @@ function buildState(room, seat, spectator = false) {
       total: player.total,
       lastAction: player.lastAction,
       isHuman: !!player.isHuman,
+      human: !!humanSeat,
+      away: !!humanSeat?.away,
       stats: { ...player.stats }
     };
   }
@@ -615,7 +399,6 @@ function buildState(room, seat, spectator = false) {
     awayReason: spectator ? null : (viewer?.awayReason || null),
     spectators: room.spectators.size,
     humans: room.humans.size,
-    humanSeats: spectator ? [] : [...room.humans.values()].map(item => map(item.seat)),
     turnKey: room.turnKey,
     turnRemaining: spectator || away ? 0 : (game.actor != null ? Math.max(0, room.actorSince + (room.turnMs || TURN_MS) - Date.now()) : 0),
     turnMs: room.turnMs || TURN_MS,
@@ -677,7 +460,7 @@ function botAct(room, seat) {
   }
 }
 
-function autoAct(room, seat) {
+function autoAct(room, seat, reason = 'timeout') {
   const game = room.game;
   const legal = game.legal(seat);
   if (!legal) return;
@@ -685,7 +468,7 @@ function autoAct(room, seat) {
     console.warn('[river] 自动行动失败：', error.message);
   }
   // 30 秒不响应：先自动过牌/弃牌，座位交给 AI 代打；token 保留，可点「重新接管」。
-  if (!markAway(room, seat, 'timeout')) bump(room);
+  if (!markAway(room, seat, reason)) bump(room);
 }
 
 function tick() {
@@ -713,7 +496,9 @@ function tick() {
     const human = [...room.humans.values()].find(item => item.seat === actor);
     if (human && !human.away) {
       if (!room.actorSince) room.actorSince = now;
-      else if (now - room.actorSince > (room.turnMs || TURN_MS)) autoAct(room, actor);
+      const activeSince = Math.max(room.actorSince || now, human.lastActive || 0);
+      if (now - activeSince > AFK_MS) autoAct(room, actor, 'afk');
+      else if (now - room.actorSince > (room.turnMs || TURN_MS)) autoAct(room, actor, 'timeout');
       continue;
     }
     if (!room.nextThinkAt) {
@@ -728,14 +513,11 @@ function tick() {
 
 function cleanup() {
   const now = Date.now();
-  let removed = false;
   for (const room of rooms.values()) {
     if (now - room.lastActivity > IDLE_TTL_MS || now - room.createdAt > MAX_TTL_MS) {
       rooms.delete(room.code);
-      removed = true;
     }
   }
-  if (removed) scheduleSaveRooms();
 }
 
 /* ------------------------------------------------------------------ *
@@ -794,6 +576,7 @@ function authRoom(req, code) {
   const room = rooms.get(code);
   if (!room) throw new HttpError(404, '房间不存在或已关闭');
   const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+  if (room.kicked?.has(token)) throw new HttpError(403, '你已被房主移出房间');
   const human = room.humans.get(token);
   if (human) {
     const stale = Date.now() - human.lastSeen > DISCONNECT_MS;
@@ -840,6 +623,7 @@ async function handleApi(req, res, url, segments) {
     const room = rooms.get(code);
     if (!room) throw new HttpError(404, '房间不存在或已关闭');
     const humanSeats = new Set([...room.humans.values()].map(human => human.seat));
+    const awaySeats = new Set([...room.humans.values()].filter(human => human.away).map(human => human.seat));
     sendJson(req, res, 200, {
       code: room.code,
       seatCount: room.game.players.length,
@@ -851,6 +635,8 @@ async function handleApi(req, res, url, segments) {
         name: player.name,
         stack: player.stack,
         isHuman: !!player.isHuman,
+        human: humanSeats.has(player.id),
+        away: awaySeats.has(player.id),
         available: !humanSeats.has(player.id)
       }))
     });
@@ -873,6 +659,21 @@ async function handleApi(req, res, url, segments) {
       throw new HttpError(409, '牌局正在发牌，请稍后再试', { retry: true });
     }
     const name = cleanName(body.name);
+    if (body.reclaim) {
+      const requested = Number(body.seat);
+      if (!Number.isInteger(requested) || requested < 0 || requested >= room.game.players.length) {
+        throw new HttpError(400, '座位不存在');
+      }
+      const entry = [...room.humans].find(([, item]) => item.seat === requested);
+      if (!entry) throw new HttpError(409, '该座位没有可接管的玩家');
+      if (!entry[1].away) throw new HttpError(409, '该玩家还在房间里，不能接管');
+      room.kicked.add(entry[0]);
+      removeHuman(room, entry[0]);
+      const token = addHuman(room, requested, name);
+      bump(room);
+      sendJson(req, res, 200, { token, state: buildState(room, requested) });
+      return;
+    }
     let seat;
     if (body.seat !== undefined && body.seat !== null) {
       const requested = Number(body.seat);
@@ -899,6 +700,11 @@ async function handleApi(req, res, url, segments) {
   if (method === 'GET' || method === 'HEAD') {
     const { room, human, spectator } = authRoom(req, code);
     const seat = human ? human.seat : 0;
+    const active = url.searchParams.get('active') === '1';
+    if (human && active) {
+      human.lastActive = Date.now();
+      if (human.away && human.awayReason === 'afk') { reclaimHuman(room, human); bump(room); }
+    }
     const since = Number(url.searchParams.get('since'));
     if (Number.isFinite(since) && since === room.version) {
       sendJson(req, res, 200, { unchanged: true });
@@ -911,6 +717,7 @@ async function handleApi(req, res, url, segments) {
   if (method !== 'POST') throw new HttpError(405, '不支持的请求方法');
   const { room, human, token, spectator } = authRoom(req, code);
   const body = await readJson(req);
+  if (human) human.lastActive = Date.now();
   const op = String(body.op || '');
   if (op === 'leave') {
     if (spectator) removeSpectator(room, token);
@@ -932,56 +739,22 @@ async function handleApi(req, res, url, segments) {
 
   if (op === 'reclaim') {
     reclaimHuman(room, human);
-  } else if (op === 'swapSeats') {
-    if (!isHost) throw new HttpError(403, '只有房主可以交换位置');
-    const a = Number(body.a);
-    const b = Number(body.b);
-    if (!Number.isInteger(a) || !Number.isInteger(b) || a < 0 || b < 0 || a >= game.players.length || b >= game.players.length) {
-      throw new HttpError(400, '座位不存在');
-    }
-    if (a === b) throw new HttpError(400, '请选择两个不同的座位');
-    if (game.phase === 'idle') {
-      swapSeatState(room, a, b);
-    } else {
-      room.pendingSwaps.push([a, b]);
-    }
-  } else if (op === 'kick') {
-    if (!isHost) throw new HttpError(403, '只有房主可以踢出玩家');
-    const seat = Number(body.seat);
-    if (!Number.isInteger(seat) || seat < 0 || seat >= game.players.length) throw new HttpError(400, '座位不存在');
-    if (seat === human.seat) throw new HttpError(400, '不能踢出自己');
-    const target = [...room.humans.entries()].find(([, item]) => item.seat === seat);
-    if (!target) throw new HttpError(404, '这个座位没有真人');
-    removeHuman(room, target[0]);
-  } else if (op === 'fillAI') {
-    if (!isHost) throw new HttpError(403, '只有房主可以补 AI');
-    const seat = Number(body.seat);
-    if (!Number.isInteger(seat) || seat < 0 || seat >= game.players.length) throw new HttpError(400, '座位不存在');
-    if ([...room.humans.values()].some(item => item.seat === seat)) throw new HttpError(409, '这个座位有真人，请先踢出');
-    if (!['idle', 'complete'].includes(game.phase)) throw new HttpError(409, '本手结束后才能补 AI');
-    const player = game.players[seat];
-    player.isHuman = false;
-    player.stack = game.buyin;
-    player.debt = 0;
-    player.pendingLoan = 0;
-    player.loans = [];
-    player.hole = [];
-    player.folded = false;
-    player.bet = 0;
-    player.total = 0;
-    player.lastAction = '';
-    player.stats = { hands: 0, vpip: 0, pfr: 0, raises: 0, calls: 0, folds: 0, faced: 0, foldToBet: 0, showdowns: 0, shownBluffs: 0 };
-    room.aiMemory[seat] = {};
-    room.emoteCooldowns[seat] = 0;
   } else if (op === 'away') {
     markAway(room, human.seat, 'manual');
+  } else if (op === 'kick') {
+    if (!isHost) throw new HttpError(403, '只有房主可以踢人');
+    const remapped = Number(body.seat);
+    if (!Number.isInteger(remapped)) throw new HttpError(400, '座位不存在');
+    const count = room.game.players.length;
+    const targetSeat = ((remapped + human.seat) % count + count) % count;
+    if (targetSeat === human.seat) throw new HttpError(400, '不能踢出自己');
+    const entry = [...room.humans].find(([, item]) => item.seat === targetSeat);
+    if (!entry) throw new HttpError(404, '该座位没有真人玩家');
+    room.kicked.add(entry[0]);
+    removeHuman(room, entry[0]);
   } else if (op === 'start') {
     if (!isHost) throw new HttpError(403, '只有房主可以开始牌局');
     if (!['idle', 'complete'].includes(game.phase)) throw new HttpError(409, '牌局正在进行中');
-    if (room.pendingSwaps.length) {
-      for (const [a, b] of room.pendingSwaps) swapSeatState(room, a, b);
-      room.pendingSwaps = [];
-    }
     game.refillBusted(humanSeats(room));
     game.startHand();
   } else if (op === 'action') {
@@ -997,7 +770,7 @@ async function handleApi(req, res, url, segments) {
     if (!emote) throw new HttpError(400, '未知的表情');
     const now = Date.now();
     const remaining = (room.emoteCooldowns[human.seat] || 0) - now;
-    if (remaining > 0) throw new HttpError(429, `表情冷却中，还需 ${Math.ceil(remaining / 1000)} 秒`);
+    if (remaining > 0) throw new HttpError(429, `表情冷却中，还需 ${remaining < 1000 ? (remaining / 1000).toFixed(1) : Math.ceil(remaining / 1000)} 秒`);
     const player = room.game.players[human.seat];
     if (player.stack < emote.cost) throw new HttpError(409, `筹码不足，这个表情要 ${emote.cost} 筹码`);
     player.stack -= emote.cost;
@@ -1045,41 +818,14 @@ async function serveStatic(req, res, pathname) {
   } catch {
     throw new HttpError(404, 'Not Found');
   }
-  const ext = extname(filePath).toLowerCase();
-  const isMedia = ['.mp3', '.m4a', '.ogg', '.wav'].includes(ext);
-  const isText = ['.html', '.js', '.mjs', '.css', '.json', '.svg', '.md', '.txt'].includes(ext);
-  const acceptsGzip = String(req.headers['accept-encoding'] || '').includes('gzip');
   const headers = {
-    'Content-Type': MIME[ext] || 'application/octet-stream',
+    'Content-Type': MIME[extname(filePath).toLowerCase()] || 'application/octet-stream',
+    'Content-Length': data.length,
     'Cache-Control': 'no-cache',
-    'X-Content-Type-Options': 'nosniff',
-    'Accept-Ranges': 'bytes'
+    'X-Content-Type-Options': 'nosniff'
   };
-  let body = data;
-  let status = 200;
-  if (isText && data.length > 1024 && acceptsGzip) {
-    body = gzipSync(data, { level: 6 });
-    headers['Content-Encoding'] = 'gzip';
-    headers['Vary'] = 'Accept-Encoding';
-  }
-  const range = req.headers.range;
-  if (range && isMedia && /^bytes=\d*-\d*$/.test(range)) {
-    const [startText, endText] = range.slice(6).split('-');
-    let start = startText ? Number(startText) : 0;
-    let end = endText ? Number(endText) : data.length - 1;
-    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || start >= data.length) {
-      res.writeHead(416, { ...headers, 'Content-Range': `bytes */${data.length}` });
-      res.end();
-      return;
-    }
-    end = Math.min(end, data.length - 1);
-    body = data.subarray(start, end + 1);
-    status = 206;
-    headers['Content-Range'] = `bytes ${start}-${end}/${data.length}`;
-  }
-  headers['Content-Length'] = body.length;
-  res.writeHead(status, headers);
-  res.end(req.method === 'HEAD' ? undefined : body);
+  res.writeHead(200, headers);
+  res.end(req.method === 'HEAD' ? undefined : data);
 }
 
 async function handle(req, res) {
@@ -1089,23 +835,11 @@ async function handle(req, res) {
     if (segments[1] === 'server-info') {
       if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, '不支持的请求方法');
       const port = server.address()?.port || PORT;
-      let publicOrigin = '';
-      try {
-        const candidate = (await readFile(PUBLIC_ORIGIN_FILE, 'utf8')).trim();
-        if (/^https?:\/\/\S+$/.test(candidate)) publicOrigin = candidate.replace(/\/$/, '');
-      } catch { /* no active public share */ }
       sendJson(req, res, 200, {
         urls: lanUrls(port),
         port,
-        publicOrigin,
-        capabilities: { publicOrigin: true, maxSeats: 10 },
         origin: `${req.headers['x-forwarded-proto'] || (req.socket.encrypted ? 'https' : 'http')}://${req.headers.host}`
       });
-      return;
-    }
-    if (segments[1] === 'leaderboard') {
-      if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, '不支持的请求方法');
-      sendJson(req, res, 200, leaderboardPayload());
       return;
     }
     if (segments[1] !== 'rooms') throw new HttpError(404, '接口不存在');
@@ -1138,9 +872,6 @@ server.on('error', error => {
   process.exit(1);
 });
 
-await loadLeaderboard();
-await loadRooms();
-
 server.listen(PORT, HOST, () => {
   const port = server.address().port;
   console.log('');
@@ -1150,29 +881,14 @@ server.listen(PORT, HOST, () => {
     for (const address of lanUrls(port)) console.log(`  局域网:   ${address}`);
     console.log('  同一 Wi-Fi 下的朋友打开局域网地址即可加入。');
   }
-  console.log('  房间和当前牌局会自动保存，重启后可恢复。按 Ctrl+C 停止。');
+  console.log('  房间数据保存在内存中，重启服务会清空。按 Ctrl+C 停止。');
   console.log('');
 });
 
-setInterval(() => { try { tick(); } catch (error) { console.error('[river] tick 异常：', error); } }, TICK_MS);
-setInterval(() => { try { cleanup(); } catch (error) { console.error('[river] cleanup 异常：', error); } }, 60000);
-function saveRoomsSync() {
-  try {
-    const tempFile = `${ROOMS_FILE}.tmp`;
-    writeFileSync(tempFile, JSON.stringify([...rooms.values()].map(roomSnapshot)));
-    renameSync(tempFile, ROOMS_FILE);
-  } catch (error) {
-    console.warn('[river] 退出前保存房间失败：', error.message);
-  }
-}
-
-function shutdownServer() {
+setInterval(tick, TICK_MS);
+setInterval(cleanup, 60000);
+process.on('SIGINT', () => {
   console.log('\n正在关闭 River Room 联机服务…');
-  saveRoomsSync();
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 1500).unref();
-}
-process.on('SIGINT', shutdownServer);
-process.on('SIGTERM', shutdownServer);
-process.on('uncaughtException', error => console.error('[river] 未捕获异常：', error));
-process.on('unhandledRejection', error => console.error('[river] 未处理 Promise：', error));
+});

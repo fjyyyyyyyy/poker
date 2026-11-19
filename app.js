@@ -3,13 +3,14 @@ import {BET_UNIT,snapBet} from './bet.js';
 import {EMOTES,EMOTE_COOLDOWN_MS} from './emotes.js';
 import {SUITS,RANKS,suit,cardText} from './evaluator.js';
 const $=s=>document.querySelector(s),fmt=n=>Math.round(n).toLocaleString('en-US');
-const cloneDeep=value=>typeof structuredClone==='function'?structuredClone(value):JSON.parse(JSON.stringify(value));
-const hasOwn=(object,key)=>Object.prototype.hasOwnProperty.call(object,key);
-const timeoutSignal=ms=>{if(typeof AbortSignal!=='undefined'&&typeof AbortSignal.timeout==='function')return AbortSignal.timeout(ms);const controller=new AbortController();setTimeout(()=>controller.abort(),ms);return controller.signal;};
-if(!Array.prototype.at)Array.prototype.at=function(index){index=Math.trunc(index)||0;if(index<0)index+=this.length;return this[index];};
+const escHtml=value=>String(value).replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+const BASE_TITLE=document.title;
+function setTurnTitle(active){
+ const title=active?'🔔 轮到你行动 · River Room':BASE_TITLE;
+ if(document.title!==title)document.title=title;
+}
 const levelLabels={easy:'入门',normal:'标准',hard:'高手'};
-const prefs={sound:true,volume:.45,speed:1,autoNext:false,assist:false,seatCount:DEFAULT_SEATS,aiLevel:DEFAULT_AI_LEVEL,turnSeconds:30,allInMusic:'kpl',nickname:''};
-const ALL_IN_TRACKS={default:{src:'allin.mp3',label:'原版全下曲'},kpl:{src:'allin-kpl.m4a',label:'我的音乐 · 巅峰对决片段'}};
+const prefs={sound:true,volume:.45,speed:1,autoNext:false,assist:false,seatCount:DEFAULT_SEATS,aiLevel:DEFAULT_AI_LEVEL,turnSeconds:30};
 const TURN_VALUES=[15,30,45,60,120,300];
 function turnLabel(ms){const s=Math.max(1,Math.round(ms/1000));return s>=60?`${Math.round(s/60)} 分钟`:`${s} 秒`;}
 function currentTurnMs(){return online?(online.turnMs||TURN_LIMIT_MS):(Number(prefs.turnSeconds||30)*1000);}
@@ -34,7 +35,7 @@ function clearSession(){
  try{sessionStorage.removeItem(SESSION_KEY);}catch{}
 }
 try{Object.assign(prefs,JSON.parse(localStorage.getItem('river-prefs')||'{}'));}catch{}
-let online=null,pollTimer=null,onlineBusy=false,reconnecting=false,reconnectAttempt=0;
+let online=null,pollTimer=null,onlineBusy=false,userActive=false;
 let game=new Game(),generation=0,busy=false,sideTab='live',raiseTo=40,previousActor=null,previousHand=0,previousStreet=null,toastTimer,audioContext,reviewViews=[];
 let launchMode='single',atTable=false,connecting=false;
 const workers=new Map();
@@ -83,7 +84,11 @@ function savePrefs(){try{localStorage.setItem('river-prefs',JSON.stringify(prefs
 function toast(text){$('#toast').textContent=text;$('#toast').classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').classList.remove('show'),3200);}
 function initAudio(){const Audio=window.AudioContext||window.webkitAudioContext;if(Audio){audioContext??=new Audio();if(audioContext.state==='suspended')audioContext.resume().catch(()=>{});}updateSound();}
 function sound(type){
- if(!prefs.sound||!audioContext)return;const ctx=audioContext,now=ctx.currentTime,vol=prefs.volume*.3;
+ if(!prefs.sound||!audioContext)return;
+ const ctx=audioContext;
+ if(ctx.state==='suspended')ctx.resume().catch(()=>{});
+ const now=ctx.currentTime,vol=prefs.volume*.3;
+ if(type==='turn'){turnStinger(ctx,now,Math.min(.95,prefs.volume*1.3));return;}
  if(type==='allin'){allInStinger(ctx,now,Math.min(.9,prefs.volume*1.1));return;}
  if(type==='showdown'){showdownStinger(ctx,now,Math.min(.8,prefs.volume));return;}
  if(type==='winner'){winnerStinger(ctx,now,Math.min(.9,prefs.volume));return;}
@@ -97,8 +102,8 @@ function sound(type){
   og.gain.setValueAtTime(vol*.22,now);og.gain.exponentialRampToValueAtTime(.001,now+.08);o.connect(og);og.connect(ctx.destination);o.start(now);o.stop(now+.09);
   return;
  }
- if(type==='win'||type==='turn'){
-  const notes=type==='win'?[523.25,659.25,783.99]:[659.25,880];notes.forEach((f,i)=>{const o=ctx.createOscillator(),g=ctx.createGain();o.type='sine';o.frequency.value=f;g.gain.setValueAtTime(0,now+i*.1);g.gain.linearRampToValueAtTime(vol*.35,now+i*.1+.01);g.gain.exponentialRampToValueAtTime(.001,now+i*.1+.5);o.connect(g);g.connect(ctx.destination);o.start(now+i*.1);o.stop(now+i*.1+.52);});return;
+ if(type==='win'){
+  [523.25,659.25,783.99].forEach((f,i)=>{const o=ctx.createOscillator(),g=ctx.createGain();o.type='sine';o.frequency.value=f;g.gain.setValueAtTime(0,now+i*.1);g.gain.linearRampToValueAtTime(vol*.35,now+i*.1+.01);g.gain.exponentialRampToValueAtTime(.001,now+i*.1+.5);o.connect(g);g.connect(ctx.destination);o.start(now+i*.1);o.stop(now+i*.1+.52);});return;
  }
  const times=type==='chips'?4:type==='deal'?2:1;
  for(let k=0;k<times;k++){
@@ -166,13 +171,13 @@ function renderEmotePanel(){
  const grid=$('#emoteGrid');if(!grid)return;
  const balance=game.players[0]?.stack||0,cd=emoteCooldownRemaining();
  setText($('#emoteBalance'),`余额 ${fmt(balance)}`);
- const cdEl=$('#emoteCooldown');if(cdEl)cdEl.textContent=cd>0?`冷却 ${Math.ceil(cd/1000)}s`:'可用';
+ const cdEl=$('#emoteCooldown');if(cdEl)cdEl.textContent=cd>0?`冷却 ${cd<1000?(cd/1000).toFixed(1):Math.ceil(cd/1000)}s`:'可用';
  grid.innerHTML=EMOTES.map(e=>`<button type="button" class="emote-item" data-emote="${e.id}" ${cd>0||balance<e.cost?'disabled':''}><span class="emote-emoji">${e.emoji}</span><span class="emote-text">${e.text}</span><span class="emote-cost">${e.cost} 筹码</span></button>`).join('');
  grid.querySelectorAll('.emote-item').forEach(button=>{button.onclick=()=>sendEmote(button.dataset.emote);});
 }
 async function sendEmote(id){
  const emote=EMOTES.find(item=>item.id===id);if(!emote)return;
- const cd=emoteCooldownRemaining();if(cd>0)return toast(`表情冷却中，还需 ${Math.ceil(cd/1000)} 秒`);
+ const cd=emoteCooldownRemaining();if(cd>0)return toast(`表情冷却中，还需 ${cd<1000?(cd/1000).toFixed(1):Math.ceil(cd/1000)} 秒`);
  const balance=game.players[0]?.stack||0;if(balance<emote.cost)return toast(`筹码不足，这个表情要 ${emote.cost} 筹码`);
  if(online){
   if(online.spectator||online.away)return;
@@ -332,20 +337,6 @@ function primeAllInAudio(){
  allInTrackPrimed=true;
  try{track.load();}catch{}
 }
-function selectedAllInMode(){
- if(prefs.allInMusic==='custom')return customAllIn?'custom':'kpl';
- return ALL_IN_TRACKS[prefs.allInMusic]?prefs.allInMusic:'kpl';
-}
-function applyAllInTrackSource(){
- const track=$('#allInTrack');if(!track)return;
- const mode=prefs.allInMusic==='default'?'default':'kpl';
- const source=ALL_IN_TRACKS[mode].src;
- if(!track.getAttribute('src')?.endsWith(source))track.setAttribute('src',source);
-}
-function updateAllInTrackLabel(){
- const label=$('#allInTrackName');
- if(label)setText(label,prefs.allInMusic==='custom'?(customAllIn?.name||'请选择自定义文件'):ALL_IN_TRACKS[selectedAllInMode()].label);
-}
 function triggerAllIn(event){
  const player=game.players[event.seat];if(!player)return;
  const overlay=$('#allInFx');if(!overlay)return;
@@ -357,9 +348,8 @@ function triggerAllIn(event){
  allInTimer=setTimeout(()=>overlay.classList.remove('show'),2050);
  setTimeout(()=>scene.classList.remove('all-in-impact'),720);
  initAudio();
- applyAllInTrackSource();
  const builtinTrack=$('#allInTrack');
- const useCustom=selectedAllInMode()==='custom'&&!!customAllIn;
+ const useCustom=!!customAllIn;
  if(prefs.sound){bgmDucked=true;clearTimeout(bgmResumeTimer);pauseBgm();}
  if(prefs.sound&&(useCustom||builtinTrack)){
   try{
@@ -380,6 +370,22 @@ function avatar(id){
  const hair=[`M21 30Q18 9 33 10Q49 10 46 31L42 21 25 20Z`,`M20 31L19 22Q18 9 34 10Q49 12 46 31L40 23 23 24Z`,`M19 50Q10 28 21 16Q37 1 47 23L48 48 40 43 43 27 25 25 25 43Z`,`M20 28Q19 10 34 11Q48 12 45 29L42 21 25 21Z`,`M19 30Q16 14 29 11Q48 7 47 30L41 23Q29 27 25 20Z`,`M18 47Q12 28 20 18Q29 4 43 15Q51 25 47 48L40 45 43 28 24 25 25 46Z`,`M20 28Q17 13 25 13Q27 7 35 11Q48 9 47 29L43 25 25 22Z`,`M17 47Q11 26 22 15Q29 8 40 14Q52 19 47 46L43 41 43 23 24 26 24 42Z`,`M20 34Q15 22 20 15Q31 5 44 14Q51 20 46 33L40 22 25 25Z`][id];
  return `<svg viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="a${id}" x2="0" y2="1"><stop stop-color="${bg}"/><stop offset="1" stop-color="${shirt}"/></linearGradient></defs><rect width="64" height="64" fill="url(#a${id})"/><circle cx="51" cy="12" r="23" fill="#fff" opacity=".07"/><path d="M7 66Q8 48 26 46H39Q57 48 59 66" fill="${shirt}"/><path d="M27 40v9l6 8 6-8V40" fill="${skin}"/><path d="${hair}" fill="#302f2b"/><ellipse cx="33" cy="31" rx="12" ry="16" fill="${skin}"/><path d="M21 29L21 20Q26 11 37 15L46 23 43 28 38 22Q30 26 23 23Z" fill="#32312b"/><path d="M26 31h3m8 0h3" stroke="#4a3f34" stroke-width="1.4" stroke-linecap="round"/><path d="M32 32l-1 6h3m-4 4q3 2 6-1" stroke="#9e7561" fill="none" stroke-width=".8"/>${id===1||id===3?'<g stroke="#464e44" fill="none" stroke-width="1.2"><rect x="22" y="28" width="10" height="7" rx="2"/><rect x="34" y="28" width="10" height="7" rx="2"/><path d="M32 30h2"/></g>':''}<path d="M25 49l8 8-6 5-9-11m22-2l-7 8 6 5 8-10" fill="#ffffff" opacity=".07"/></svg>`;
 }
+function turnStinger(ctx,now,level){
+ if(level<=0)return;
+ const master=ctx.createGain();
+ master.gain.value=Math.max(.02,level*.62);
+ master.connect(ctx.destination);
+ // 三音提示：E5-G5-C6，清晰但不刺耳
+ [659.25,783.99,1046.5].forEach((f,i)=>{
+  const at=now+i*.13,o=ctx.createOscillator(),g=ctx.createGain();
+  o.type=i===2?'triangle':'sine';o.frequency.value=f;
+  g.gain.setValueAtTime(0,at);
+  g.gain.linearRampToValueAtTime(i===2?.28:.18,at+.015);
+  g.gain.exponentialRampToValueAtTime(.001,at+(i===2?.9:.7));
+  o.connect(g);g.connect(master);o.start(at);o.stop(at+(i===2?.92:.72));
+ });
+}
+
 function winnerStinger(ctx,now,level){
  if(level<=0)return;
  const master=ctx.createGain();master.gain.setValueAtTime(.0001,now);master.gain.exponentialRampToValueAtTime(Math.max(.02,level),now+.03);master.gain.setValueAtTime(Math.max(.02,level),now+.9);master.gain.exponentialRampToValueAtTime(.0001,now+1.7);master.connect(ctx.destination);
@@ -513,6 +519,7 @@ function render(){
   else{clearLocalTurnTimer();if(!online)turnDeadline=0;}
   previousActor=game.actor;previousHand=game.hand;previousStreet=game.street;
  }
+ setTurnTitle(game.actor===0&&!!legal&&!online?.spectator&&!online?.away);
  scene.classList.toggle('hand-complete',done);
  scene.classList.toggle('showdown',done&&game.result.showdown);
  const message=$('#tableMessage');message.classList.toggle('is-result',done);
@@ -553,7 +560,7 @@ function renderActions(){
   return;
  }
  if(online?.away){
-  dock.innerHTML=`<div class="waiting-bar spectator-bar"><span class="waiting-symbol" aria-hidden="true">⏸</span><div><strong>座位暂由 AI 代打</strong><p>${online.awayReason==='timeout'?'30 秒未操作':online.awayReason==='manual'?'你暂时离开了房间':'连接中断'} · 随时可以回来接管</p></div><button class="action-button primary" id="reclaimSeat">重新接管</button></div>`;
+  dock.innerHTML=`<div class="waiting-bar spectator-bar"><span class="waiting-symbol" aria-hidden="true">⏸</span><div><strong>座位暂由 AI 代打</strong><p>${online.awayReason==='timeout'?'回合超时':online.awayReason==='afk'?'轮到你时 1 分钟未操作':online.awayReason==='manual'?'你暂时离开了房间':'连接中断'} · 随时可以回来接管</p></div><button class="action-button primary" id="reclaimSeat">重新接管</button></div>`;
   $('#reclaimSeat').onclick=()=>roomOp('reclaim');
   return;
  }
@@ -750,52 +757,21 @@ function openProfiles(){
  }).join('')}</div>`);
 }
 function openRules(){
- openModal('游戏规则',`<div class="rule-row"><span>牌桌</span><strong>${MIN_SEATS}–${MAX_SEATS} 人无限注德州扑克</strong></div><div class="rule-row"><span>盲注</span><strong>10 / 20</strong></div><div class="rule-row"><span>初始筹码</span><strong>2,000</strong></div><h3>发牌顺序</h3><p>每人两张底牌。翻牌发 3 张公共牌，转牌和河牌各发 1 张。</p><h3>下注</h3><p>输入本轮投入总额，按 10 筹码递增。全下使用全部剩余筹码。多人全下按边池结算，平局分池。</p><h3>强制还款</h3><p>筹码高于 ${fmt(FORCE_REPAY_AT)} 时，超出 ${fmt(FORCE_REPAY_AT)} 的部分会自动用于偿还欠款，真人玩家和 AI 都适用。</p><h3>借筹码</h3><p>只有筹码低于 ${fmt(BORROW_THRESHOLD)} 时才能借入 ${fmt(LOAN_AMOUNT)}；累计欠款最多 ${fmt(MAX_DEBT)}（${Math.floor(MAX_DEBT/LOAN_AMOUNT)} 次），还清欠款后可以再借。牌局中借入的筹码下手到账；即使到账前输光，下一手开始时会自动补回。</p><h3>思考时间</h3><p>每位玩家每回合 ${turnLabel(currentTurnMs())}（创建房间时可在 15 秒–5 分钟之间选择）；超时自动过牌/弃牌，联机时该座位转由 AI 代打。掉线 30 秒同样由 AI 代打，但会保留登录凭证：回来自动恢复，超时可在行动栏点「重新接管」。</p><h3>入座与观战</h3><p>加入时可自选接替某个 AI 座位（重新买入 2,000），或新开一个房间；每个座位标注“真人”或“AI”。房间面板可「暂时离开」：座位交给 AI 但保留重连凭证，首页会出现“回到房间”，刷新或重新打开页面也会自动恢复；「彻底退出」才会释放座位。观战加入不占座、看不到任何底牌、不能操作牌局。摊牌时会出现双方牌型对比动画，展示约 10 秒，点击任意处可跳过。</p><h3>表情</h3><p>牌桌有 15 个表情（含「😫 闹麻了」「🤡 小丑」「🍬 糖完了」「📱 扫码了」），10–20 筹码一次，8 秒冷却；筹码从自己的座位扣除，所有玩家都能看到气泡。观战或暂时离开时不能发表情。</p><h3>AI 辅助</h3><p>AI 辅助只在单人练习中可用；联机房间为公平起见不提供。</p><h3>牌型</h3><p>同花顺 › 四条 › 葫芦 › 同花 › 顺子 › 三条 › 两对 › 一对 › 高牌。取最强的五张牌。</p><p>快捷键 F 弃牌，C 过牌或跟注，R 下注或加注。</p>`);
-}
-let leaderboardCache=null;
-const lbEscape=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
-function lbDate(at){try{return new Date(at).toLocaleDateString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});}catch{return '';}}
-function lbRows(kind){
- const list=kind==='win'?leaderboardCache.wins:leaderboardCache.hands;
- if(!list.length)return '<p class="lb-empty">近期还没有线上完整牌局上榜。</p>';
- return `<div class="lb-list">${list.map((entry,index)=>`<button type="button" class="lb-row" data-lb-kind="${kind}" data-lb-index="${index}"><span class="lb-rank">${String(index+1).padStart(2,'0')}</span><strong>${kind==='win'?'+'+fmt(entry.amount):lbEscape(entry.hand)}</strong><span class="lb-open">详情 ›</span></button>`).join('')}</div>`;
-}
-function bindLbRows(){document.querySelectorAll('[data-lb-kind]').forEach(button=>button.onclick=()=>openLbDetail(button.dataset.lbKind,Number(button.dataset.lbIndex)));}
-function openLeaderboard(tab='win'){
- openModal('排行榜',`<div class="lb-tabs"><button type="button" data-lb-tab="win" ${tab==='win'?'class="selected"':''}>最大赢池</button><button type="button" data-lb-tab="hand" ${tab==='hand'?'class="selected"':''}>最强牌型</button></div><div id="lbList" aria-live="polite">加载中…</div><p class="lb-note">线上房间近 30 天 · 仅统计真人玩家 · 点开可看牌面和详情</p>`);
- const list=$('#lbList');
- const render=()=>{list.innerHTML=lbRows(tab);bindLbRows();};
- document.querySelectorAll('[data-lb-tab]').forEach(button=>button.onclick=()=>{tab=button.dataset.lbTab;document.querySelectorAll('[data-lb-tab]').forEach(item=>item.classList.toggle('selected',item===button));render();});
- if(leaderboardCache)render();
- fetch('/api/leaderboard',{signal:timeoutSignal(12000)}).then(response=>{if(!response.ok)throw Error('联机服务暂时不可用');return response.json();}).then(data=>{leaderboardCache={wins:data.wins||[],hands:data.hands||[]};render();}).catch(error=>{if(!leaderboardCache)list.innerHTML=`<p class="lb-empty">${lbEscape(error.message||'排行榜暂时不可用')}</p>`;});
-}
-function openLbDetail(kind,index){
- const entry=(kind==='win'?leaderboardCache?.wins:leaderboardCache?.hands)?.[index];if(!entry)return;
- const detail=entry.detail||{},hole=detail.hole||entry.hole||[],board=detail.board||entry.board||[],players=detail.players||[],winners=detail.winners||[];
- const cards=values=>values.length?values.map(value=>card(value)).join(''):'<span class="lb-none">未摊牌</span>';
- openModal(kind==='win'?'最大赢池详情':'最强牌型详情',`<div class="lb-detail"><div class="lb-detail-head"><div><small>${kind==='win'?'赢池':'牌型'}</small><strong>${kind==='win'?'+'+fmt(entry.amount):lbEscape(entry.hand)}</strong></div><div><small>${kind==='win'?'获胜者':'牌型持有者'}</small><strong>${lbEscape(entry.winner)}</strong></div></div><div class="lb-cards"><div><small>底牌</small><div class="lb-card-row">${cards(hole)}</div></div><div><small>公共牌</small><div class="lb-card-row">${cards(board)}</div></div></div><div class="lb-facts"><span>底池 <strong>${fmt(detail.pot??entry.amount)}</strong></span><span>牌型 <strong>${lbEscape(detail.hand||entry.hand||'未摊牌')}</strong></span><span>时间 <strong>${lbDate(entry.at)}</strong></span></div>${players.length?`<h3>本手玩家</h3><div class="lb-players">${players.map(player=>`<div><span>${player.seat} 号 · ${lbEscape(player.name)}${player.folded?' · 已弃牌':''}</span><span class="lb-player-cards">${player.hole?.length?player.hole.map(value=>card(value)).join(''):'<em>未摊牌</em>'}</span></div>`).join('')}</div>`:''}${winners.length?`<p class="lb-winner-line">赢池分配：${winners.map(winner=>`${lbEscape(winner.name)} +${fmt(winner.amount)}`).join(' · ')}</p>`:''}<button type="button" class="text-button" id="lbBack">← 返回排行榜</button></div>`);
- $('#lbBack').onclick=()=>openLeaderboard(kind==='win'?'win':'hand');
+ openModal('游戏规则',`<div class="rule-row"><span>牌桌</span><strong>${MIN_SEATS}–${MAX_SEATS} 人无限注德州扑克</strong></div><div class="rule-row"><span>盲注</span><strong>10 / 20</strong></div><div class="rule-row"><span>初始筹码</span><strong>2,000</strong></div><h3>发牌顺序</h3><p>每人两张底牌。翻牌发 3 张公共牌，转牌和河牌各发 1 张。</p><h3>下注</h3><p>输入本轮投入总额，按 10 筹码递增。全下使用全部剩余筹码。多人全下按边池结算，平局分池。</p><h3>强制还款</h3><p>筹码高于 ${fmt(FORCE_REPAY_AT)} 时，超出 ${fmt(FORCE_REPAY_AT)} 的部分会自动用于偿还欠款，真人玩家和 AI 都适用。</p><h3>借筹码</h3><p>只有筹码低于 ${fmt(BORROW_THRESHOLD)} 时才能借入 ${fmt(LOAN_AMOUNT)}；累计欠款最多 ${fmt(MAX_DEBT)}（${Math.floor(MAX_DEBT/LOAN_AMOUNT)} 次），还清欠款后可以再借。牌局中借入的筹码下手到账；即使到账前输光，下一手开始时会自动补回。</p><h3>思考时间</h3><p>每位玩家每回合 ${turnLabel(currentTurnMs())}（创建房间时可在 15 秒–5 分钟之间选择）；超时自动过牌/弃牌，联机时该座位转由 AI 代打。掉线 30 秒同样由 AI 代打，但会保留登录凭证：回来自动恢复，超时可在行动栏点「重新接管」。另外，轮到你时从这一回合开始算，连续 1 分钟没有任何操作（点击/按键/触摸/移动），会自动转 AI 代打；不是你的回合不会因为不动被托管。动一下或点「重新接管」即可恢复。</p><h3>入座与观战</h3><p>加入时可自选接替某个 AI 座位（重新买入 2,000），或新开一个房间；每个座位标注“真人”或“AI”。房主可以在「房间」面板里复制邀请链接邀请朋友，也可以把房间里的真人玩家踢出（座位自动转为 AI）。房间面板可「暂时离开」：座位交给 AI 但保留重连凭证，首页会出现“回到房间”，刷新或重新打开页面也会自动恢复；「彻底退出」才会释放座位。观战加入不占座、看不到任何底牌、不能操作牌局。摊牌时会出现双方牌型对比动画，展示约 10 秒，点击任意处可跳过。</p><h3>表情</h3><p>牌桌有 15 个表情（含「😫 闹麻了」「🤡 小丑」「🍬 糖完了」「📱 扫码了」），10–20 筹码一次，0.5 秒冷却；筹码从自己的座位扣除，所有玩家都能看到气泡。观战或暂时离开时不能发表情。</p><h3>AI 辅助</h3><p>AI 辅助只在单人练习中可用；联机房间为公平起见不提供。</p><h3>牌型</h3><p>同花顺 › 四条 › 葫芦 › 同花 › 顺子 › 三条 › 两对 › 一对 › 高牌。取最强的五张牌。</p><p>快捷键 F 弃牌，C 过牌或跟注，R 下注或加注。</p>`);
 }
 function openSettings(){
- openModal('设置',`<div class="setting-row"><label for="settingSound">音效</label><input type="checkbox" id="settingSound" ${prefs.sound?'checked':''}></div><div class="setting-row"><label for="settingVolume">音量</label><input type="range" id="settingVolume" min="0" max="1" step=".05" value="${prefs.volume}"></div><div class="setting-row"><label for="allInMusicSelect">全下音乐</label><select id="allInMusicSelect"><option value="default" ${prefs.allInMusic==='default'?'selected':''}>原版全下曲</option><option value="kpl" ${prefs.allInMusic==='kpl'?'selected':''}>我的音乐 · 巅峰对决片段</option><option value="custom" ${prefs.allInMusic==='custom'?'selected':''}>自定义文件</option></select></div><div class="setting-row"><span>当前全下音乐<small>仅本机生效</small></span><strong id="allInTrackName">${prefs.allInMusic==='custom'?(customAllIn?.name||'未选择文件'):ALL_IN_TRACKS[prefs.allInMusic==='default'?'default':'kpl'].label}</strong></div><div class="setting-row"><label for="allInAudioInput">自定义音频<small>不会上传，也不随游戏分发</small></label><span class="audio-actions"><button type="button" id="pickAllInAudio" class="text-button">选择文件</button><button type="button" id="clearAllInAudio" class="text-button">清除自定义</button></span></div><input type="file" id="allInAudioInput" accept="audio/*" hidden><div class="setting-row"><span>AI 强度</span><strong>${levelLabels[game.aiLevel]}</strong></div>${online?'':`<div class="setting-row"><label for="settingAssist">AI 辅助</label><input type="checkbox" id="settingAssist" ${prefs.assist?'checked':''}></div>`}${online?'':`<div class="setting-row"><label for="settingSpeed">AI 节奏</label><select id="settingSpeed"><option value="1" ${prefs.speed===1?'selected':''}>标准</option><option value="2.5" ${prefs.speed!==1?'selected':''}>快速</option></select></div><div class="setting-row"><label for="settingAuto">自动下一手</label><input type="checkbox" id="settingAuto" ${prefs.autoNext?'checked':''}></div>`}${online&&!online.host?'':'<button class="action-button modal-action" id="resetTable">重置牌桌</button>'}`);
+ openModal('设置',`<div class="setting-row"><label for="settingSound">音效</label><input type="checkbox" id="settingSound" ${prefs.sound?'checked':''}></div><div class="setting-row"><label for="settingVolume">音量</label><input type="range" id="settingVolume" min="0" max="1" step=".05" value="${prefs.volume}"></div><div class="setting-row"><span>全下音效<small>仅本机生效</small></span><strong id="allInTrackName">${customAllIn?.name||'默认合成音效'}</strong></div><div class="setting-row"><label for="allInAudioInput">自定义音频<small>不会上传，也不随游戏分发</small></label><span class="audio-actions"><button type="button" id="pickAllInAudio" class="text-button">选择文件</button><button type="button" id="clearAllInAudio" class="text-button">恢复默认</button></span></div><input type="file" id="allInAudioInput" accept="audio/*" hidden><div class="setting-row"><span>AI 强度</span><strong>${levelLabels[game.aiLevel]}</strong></div>${online?'':`<div class="setting-row"><label for="settingAssist">AI 辅助</label><input type="checkbox" id="settingAssist" ${prefs.assist?'checked':''}></div>`}${online?'':`<div class="setting-row"><label for="settingSpeed">AI 节奏</label><select id="settingSpeed"><option value="1" ${prefs.speed===1?'selected':''}>标准</option><option value="2.5" ${prefs.speed!==1?'selected':''}>快速</option></select></div><div class="setting-row"><label for="settingAuto">自动下一手</label><input type="checkbox" id="settingAuto" ${prefs.autoNext?'checked':''}></div>`}${online&&!online.host?'':'<button class="action-button modal-action" id="resetTable">重置牌桌</button>'}`);
  $('#settingSound').onchange=e=>{prefs.sound=e.target.checked;initAudio();savePrefs();};
  $('#settingVolume').oninput=e=>{prefs.volume=Number(e.target.value);savePrefs();updateBgmVolume();};
  const audioInput=$('#allInAudioInput');
- const musicSelect=$('#allInMusicSelect');
- musicSelect.onchange=()=>{
-  const mode=musicSelect.value;
-  if(mode==='custom'&&!customAllIn){audioInput.click();return;}
-  prefs.allInMusic=mode;savePrefs();applyAllInTrackSource();updateAllInTrackLabel();
- };
- applyAllInTrackSource();updateAllInTrackLabel();
  $('#pickAllInAudio').onclick=()=>audioInput.click();
  audioInput.onchange=async()=>{
   const file=audioInput.files?.[0];if(!file)return;
-  try{await writeCustomAllIn(file);prefs.allInMusic='custom';savePrefs();if(musicSelect)musicSelect.value='custom';setText($('#allInTrackName'),file.name);toast(`全下音乐已设为 ${file.name}`);}
+  try{await writeCustomAllIn(file);setText($('#allInTrackName'),file.name);toast(`全下音效已设为 ${file.name}`);}
   catch{toast('这个音频无法保存，换一个文件试试');}
   audioInput.value='';
  };
- $('#clearAllInAudio').onclick=async()=>{await clearCustomAllIn();prefs.allInMusic='kpl';savePrefs();if(musicSelect)musicSelect.value='kpl';applyAllInTrackSource();updateAllInTrackLabel();toast('已切换回我的音乐');};
+ $('#clearAllInAudio').onclick=async()=>{await clearCustomAllIn();setText($('#allInTrackName'),'默认合成音效');toast('已恢复默认全下音效');};
  const settingAssist=$('#settingAssist');if(settingAssist)settingAssist.onchange=e=>setAssist(e.target.checked);
  if(!online){
   $('#settingSpeed').onchange=e=>{prefs.speed=Number(e.target.value);savePrefs();updateSpeed();};
@@ -840,7 +816,7 @@ function showTable(){
  startBgm();
 }
 function showStart(){
- atTable=false;$('#tableScreen').hidden=true;$('#startScreen').hidden=false;
+ atTable=false;$('#tableScreen').hidden=true;$('#startScreen').hidden=false;setTurnTitle(false);
  hideShowdown();
  const resume=$('#resumeGame');if(resume)resume.hidden=game.hand===0||!!online;
  const savedSession=readSession(),roomResume=$('#resumeRoom');
@@ -863,11 +839,10 @@ function launchTable(){
  startHand();$('#homeButton').focus();
 }
 function initialize(){
- applyAllInTrackSource();
  const dialog=document.getElementById('modal');
  $('#seatCount').value=Number.isInteger(prefs.seatCount)&&prefs.seatCount>=MIN_SEATS&&prefs.seatCount<=MAX_SEATS?prefs.seatCount:DEFAULT_SEATS;
  $('#turnSeconds').value=TURN_VALUES.includes(Number(prefs.turnSeconds))?String(prefs.turnSeconds):'30';
- $('#aiLevel').value=hasOwn(levelLabels,prefs.aiLevel)?prefs.aiLevel:DEFAULT_AI_LEVEL;
+ $('#aiLevel').value=Object.hasOwn(levelLabels,prefs.aiLevel)?prefs.aiLevel:DEFAULT_AI_LEVEL;
  $('#startAssist').checked=!!prefs.assist;
  $('#startAssist').onchange=rememberSetup;
  $('#seatCount').onchange=rememberSetup;$('#aiLevel').onchange=rememberSetup;$('#turnSeconds').onchange=rememberSetup;
@@ -876,7 +851,6 @@ function initialize(){
  $('#launchGame').onclick=launchTable;
  if($('#resumeRoom'))$('#resumeRoom').onclick=()=>{if(!connecting)restoreSavedSession();};
  $('#joinGame').onclick=()=>{if(!connecting){rememberSetup();openMultiplayer('join');}};
- $('#leaderboardButton').onclick=()=>openLeaderboard();
  if($('#resumeGame'))$('#resumeGame').onclick=()=>{if(!connecting){showTable();render();pump();$('#homeButton').focus();}};
  $('#homeButton').onclick=event=>{event.preventDefault();if(online)openMultiplayer();else showStart();};
  $('#advisorToggle').onclick=()=>setAssist(!prefs.assist);
@@ -885,15 +859,16 @@ function initialize(){
  $('#helpButton').onclick=openRules;$('#borrowButton').onclick=borrowChips;$('#repayButton').onclick=repayChips;$('#ledgerButton').onclick=openLedger;
  for(const id of ['#multiplayerButton','#multiplayerTopButton'])if($(id))$(id).onclick=()=>openMultiplayer();
  $('#closeModal').onclick=closeModal;
- $('#reconnectButton').onclick=reconnectNow;
- window.addEventListener('online',()=>{if(online)reconnectNow();});
- document.addEventListener('visibilitychange',()=>{if(!document.hidden&&online)reconnectNow();});
  dialog.addEventListener('click',e=>{if(e.target===dialog){const r=dialog.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)closeModal();}});
- $$('[data-nav]').forEach(b=>b.onclick=()=>{const type=b.dataset.nav;if(type==='table'){closeModal();return;}({history:openHistory,players:openProfiles,leaderboard:openLeaderboard,settings:openSettings})[type]();});
+ $$('[data-nav]').forEach(b=>b.onclick=()=>{const type=b.dataset.nav;if(type==='table'){closeModal();return;}({history:openHistory,players:openProfiles,settings:openSettings})[type]();});
  $$('[data-tab]').forEach(b=>b.onclick=()=>{sideTab=b.dataset.tab;$$('[data-tab]').forEach(x=>x.classList.toggle('selected',x===b));renderSide();});
  hiddenSidebar.addEventListener('change',renderSide);
  document.addEventListener('click',e=>{if(e.target.closest('#panelHistory'))openHistory();});
- document.addEventListener('pointerdown',()=>{if(atTable&&prefs.sound)startBgm();});
+ document.addEventListener('pointerdown',()=>{userActive=true;if(atTable&&prefs.sound)startBgm();},{capture:true});
+document.addEventListener('pointermove',()=>{userActive=true;},{capture:true,passive:true});
+document.addEventListener('touchstart',()=>{userActive=true;},{capture:true,passive:true});
+document.addEventListener('keydown',()=>{userActive=true;},{capture:true});
+document.addEventListener('wheel',()=>{userActive=true;},{capture:true,passive:true});
  $('#showdownFx')?.addEventListener('click',hideShowdown);
  if($('#emoteButton'))$('#emoteButton').onclick=event=>{event.stopPropagation();const panel=$('#emotePanel');if(!panel)return;panel.hidden=!panel.hidden;$('#emoteButton').setAttribute('aria-expanded',String(!panel.hidden));renderEmotePanel();};
  if($('#emotePanel'))$('#emotePanel').addEventListener('click',event=>event.stopPropagation());
@@ -937,19 +912,19 @@ function openLedger(){
 }
 function cleanNickname(value){return String(value||'').replace(/[^\p{L}\p{N} _.-]/gu,'').trim().slice(0,12)||'玩家';}
 function newRequestId(){if(globalThis.crypto?.randomUUID)return crypto.randomUUID();const bytes=crypto.getRandomValues(new Uint8Array(16));return Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');}
-function stopOnline(keepSession=false){clearTimeout(pollTimer);stopCustomAllIn();clearLocalTurnTimer();turnDeadline=0;online=null;onlineBusy=false;if(!keepSession)clearSession();}
+function stopOnline(keepSession=false){clearTimeout(pollTimer);stopCustomAllIn();clearLocalTurnTimer();turnDeadline=0;online=null;onlineBusy=false;setTurnTitle(false);if(!keepSession)clearSession();}
 function roomLine(){return `${online.humans} 位玩家 · ${online.seatCount-online.humans} 位 AI${online.spectators?` · ${online.spectators} 观战`:''} · ${levelLabels[online.aiLevel]} · 回合 ${turnLabel(online.turnMs||TURN_LIMIT_MS)}`;}
 function roomTitle(room){return `${room.seatCount} 人房 · ${room.code}${room.spectator?' · 观战':''}${room.away?' · AI 代打':''}`;}
 function applyRoom(state){
  if(!online||state.version<online.version)return;
  const changed=state.version!==online.version;
- Object.assign(online,{version:state.version,host:state.host,humans:state.humans,humanSeats:state.humanSeats||[],turnKey:state.turnKey,seatCount:state.seatCount??state.players.length,aiLevel:state.aiLevel??'normal',spectator:!!state.spectator,spectators:state.spectators||0,away:!!state.away,awayReason:state.awayReason||'',turnMs:state.turnMs||online.turnMs||TURN_LIMIT_MS});
+ Object.assign(online,{version:state.version,host:state.host,humans:state.humans,turnKey:state.turnKey,seatCount:state.seatCount??state.players.length,aiLevel:state.aiLevel??'normal',spectator:!!state.spectator,spectators:state.spectators||0,away:!!state.away,awayReason:state.awayReason||'',turnMs:state.turnMs||online.turnMs||TURN_LIMIT_MS});
  online.emoteCooldownAt=Date.now()+Math.max(0,state.emoteCooldown||0);
  const roomMeta=$('#roomMeta');if(roomMeta)setText(roomMeta,roomLine()+(online.host?' · 房主':'')+(online.spectator?' · 观战':'')+(online.away?' · AI 代打':''));
  if(!changed){setText($('#modeLabel'),roomTitle(online));return;}
  const last=game.events.at(-1),newEvent=state.events.at(-1),newHand=state.sessionId!==game.sessionId||state.hand!==game.hand;
  if(newHand){reviewViews=[];previousActor=null;previousStreet=null;previousHand=0;}
- game=Object.assign(Object.create(Game.prototype),state,{aiLevel:online.aiLevel});game.legal=(id=game.actor)=>id===0?state.actionOptions:null;game.publicView=()=>cloneDeep(state.reviewView);
+ game=Object.assign(Object.create(Game.prototype),state,{aiLevel:online.aiLevel});game.legal=(id=game.actor)=>id===0?state.actionOptions:null;game.publicView=()=>structuredClone(state.reviewView);
  turnDeadline=state.actor===0&&state.phase==='playing'?Date.now()+Math.max(0,state.turnRemaining||0):0;
  let pendingEmote=null;
  if(newEvent&&JSON.stringify(last)!==JSON.stringify(newEvent)&&newEvent.kind==='emote'){pendingEmote=newEvent;sound('tap');}
@@ -962,30 +937,10 @@ function applyRoom(state){
  if(pendingEmote){showEmote(pendingEmote.seat,pendingEmote);pendingEmote=null;}if(state.phase==='complete'&&changed)sound(state.result.heroDelta>0?'win':'tap');
 }
 async function roomRequest(path,body,token=online?.token){
- const response=await fetch('/api/rooms'+path,{method:body?'POST':'GET',headers:{...(body?{'Content-Type':'application/json'}:{}),...(token?{Authorization:'Bearer '+token}:{})},...(body?{body:JSON.stringify(body)}:{}),signal:timeoutSignal(12000)});
+ const response=await fetch('/api/rooms'+path,{method:body?'POST':'GET',headers:{...(body?{'Content-Type':'application/json'}:{}),...(token?{Authorization:'Bearer '+token}:{})},...(body?{body:JSON.stringify(body)}:{}),signal:AbortSignal.timeout(12000)});
  let data;try{data=await response.json();}catch{throw Error('房间服务暂时不可用');}if(!response.ok)throw Object.assign(Error(data.error||'连接失败'),{status:response.status,retry:!!data.retry});return data;
 }
-function setReconnectState(active, text='连接中断 · 正在重连…'){
- reconnecting=!!active;
- const button=$('#reconnectButton');
- if(button)button.hidden=!active;
- if(active)setText($('#modeLabel'),text);
-}
-function reconnectNow(){
- if(!online)return;
- clearTimeout(pollTimer);pollTimer=null;
- if(reconnecting)setText($('#modeLabel'),'正在重新连接…');
- pollRoom();
-}
-function markReconnectSuccess(){
- if(!reconnecting)return;
- reconnecting=false;reconnectAttempt=0;
- const button=$('#reconnectButton');if(button)button.hidden=true;
- if(online)setText($('#modeLabel'),roomTitle(online));
- toast('连接已恢复');
-}
 function exitRoom(keepSession=false){
- setReconnectState(false);reconnectAttempt=0;
  stopOnline(keepSession);
  if(invitedRoom())history.replaceState(null,'',location.pathname+location.search);
  newLocalTable(setupOptions());closeModal();setMode('multi');showStart();
@@ -993,25 +948,20 @@ function exitRoom(keepSession=false){
 async function pollRoom(){
  const session=online;
  if(!session)return;
- pollTimer=null;
- let delayMs=1000;
  try{
   if(!onlineBusy){
-   const data=await roomRequest(`/${session.code}?since=${session.version}`);
+   const active=userActive?'&active=1':'';userActive=false;
+  const data=await roomRequest(`/${session.code}?since=${session.version}${active}`);
    if(online===session){
     if(data.unchanged)setText($('#modeLabel'),roomTitle(session));
     else applyRoom(data.state);
-    markReconnectSuccess();
    }
   }
  }catch(error){
   if(online!==session)return;
-  if(error.status===401||error.status===404){exitRoom();toast(error.message);return;}
-  reconnectAttempt++;
-  setReconnectState(true);
-  delayMs=Math.min(6000,Math.round(700*Math.pow(1.7,Math.min(reconnectAttempt,5))));
-  setText($('#modeLabel'),`连接中断 · ${Math.ceil(delayMs/1000)} 秒后重试`);
- }finally{if(online===session){clearTimeout(pollTimer);pollTimer=setTimeout(pollRoom,delayMs);}}
+  if(error.status===401||error.status===403||error.status===404){exitRoom();toast(error.message);return;}
+  $('#modeLabel').textContent='重连中…';
+ }finally{if(online===session)pollTimer=setTimeout(pollRoom,1000);}
 }
 async function roomOp(op,extra={}){
  const session=online;
@@ -1028,12 +978,11 @@ async function roomOp(op,extra={}){
  finally{if(online===session)onlineBusy=false;}
 }
 function enterRoom(data,code,inviteOrigin){
- generation++;busy=false;clearLocalTurnTimer();turnDeadline=0;
+ generation++;busy=false;clearLocalTurnTimer();turnDeadline=0;userActive=true;
  // 只有进入时已经结束的摊牌才不回放；中途进桌，本手结束时仍要展示比牌。
  showdownKey=data.state.phase==='complete'?`${data.state.sessionId}:${data.state.hand}`:'';
  hideShowdown();
  for(const key of [...workers.keys()])stopWorker(key);
- setReconnectState(false);reconnectAttempt=0;
  online={code,token:data.token,version:-1,inviteOrigin:inviteOrigin||location.origin,spectator:!!data.spectator||!!data.state?.spectator,spectators:data.state?.spectators||0,away:!!data.state?.away,awayReason:data.state?.awayReason||'',turnMs:data.state?.turnMs||TURN_LIMIT_MS};
  writeSession({code,token:data.token,inviteOrigin:online.inviteOrigin});
  $('#advisorPanel').open=false;
@@ -1043,11 +992,10 @@ function enterRoom(data,code,inviteOrigin){
 }
 async function bestInviteOrigin(){
  const host=location.hostname;
- const privateHost=/^(?:localhost|127\.|10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.|\[?::1\]?)$/i.test(host)||/^(?:localhost|127\.|10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/i.test(host);
- if(host&&!privateHost)return location.origin.replace(/\/$/,'');
+ if(host&&!['127.0.0.1','localhost','::1','[::1]'].includes(host))return location.origin.replace(/\/$/,'');
  try{
-  const r=await fetch('/api/server-info',{cache:'no-store',signal:timeoutSignal(3000)});
-  if(r.ok){const info=await r.json();if(info.publicOrigin)return String(info.publicOrigin).replace(/\/$/,'');if(Array.isArray(info.urls)&&info.urls[0])return String(info.urls[0]).replace(/\/$/,'');}
+  const r=await fetch('/api/server-info',{cache:'no-store',signal:AbortSignal.timeout(3000)});
+  if(r.ok){const info=await r.json();if(Array.isArray(info.urls)&&info.urls[0])return String(info.urls[0]).replace(/\/$/,'');}
  }catch{}
  return location.origin.replace(/\/$/,'');
 }
@@ -1055,98 +1003,31 @@ function invitedRoom(){
  const incoming=new URLSearchParams(location.hash.slice(1)).get('room')?.toUpperCase()||'';
  return /^[A-Z2-9]{8}$/.test(incoming)?incoming:'';
 }
-function invitedSeat(){
- const params=new URLSearchParams(location.hash.slice(1));
- const seat=Number(params.get('seat'));
- return Number.isInteger(seat)&&seat>=0?seat:null;
-}
-function invitedHost(){
- return new URLSearchParams(location.hash.slice(1)).get('host')==='1';
-}
-let qrLoader=null;
-function ensureQrLib(){
- if(window.qrcode)return Promise.resolve(window.qrcode);
- if(!qrLoader)qrLoader=new Promise((resolve,reject)=>{
-  const script=document.createElement('script');
-  script.src='qrcode.js';script.async=true;
-  script.onload=()=>window.qrcode?resolve(window.qrcode):reject(Error('二维码组件加载失败'));
-  script.onerror=()=>reject(Error('二维码组件加载失败'));
-  document.head.append(script);
- });
- return qrLoader;
-}
-async function renderInviteQr(text){
- const box=$('#inviteQr');if(!box)return;
- box.innerHTML='<span class="qr-placeholder">二维码加载中…</span>';
- try{
-  const qr=await ensureQrLib();
-  if(!document.body.contains(box))return;
-  const code=qr(0,'M');code.addData(text);code.make();
-  box.innerHTML=code.createSvgTag({cellSize:4,margin:2,scalable:true,alt:'扫码加入房间'});
- }catch{
-  if(document.body.contains(box))box.innerHTML='<span class="qr-placeholder">二维码加载失败，请复制邀请链接</span>';
- }
-}
-function escapeNickname(value){return String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));}
-async function copyText(value){
- try{await navigator.clipboard.writeText(value);toast('链接已复制');}
- catch{toast('复制失败，请手动选择链接');}
-}
-function seatInviteLink(seat){
- const origin=(online?.inviteOrigin||location.origin).replace(/\/$/,'');
- return `${origin}/#room=${online.code}&seat=${seat}`;
-}
-function openSeatSwap(){
- if(!online?.host||!game.players.length)return;
- const queued=game.phase!=='idle';
- const options=game.players.map(player=>`<option value="${player.absoluteSeat ?? player.id}">${player.id+1} 号 · ${lbEscape(player.name)}${player.isHuman?'（真人）':'（AI）'}</option>`).join('');
- openModal('交换两人位置',`<p class="swap-note">${queued?'当前牌局进行中/刚结束，交换会在下一手发牌前生效，不会打乱本手底池和行动。':'牌局开始前，交换会立即生效。'}</p><div class="swap-selects"><label>位置 A<select id="swapA">${options}</select></label><label>位置 B<select id="swapB">${options}</select></label></div><p id="swapError" class="swap-error"></p><div class="ledger-actions"><button id="confirmSwap" class="action-button primary">确认交换</button><button id="cancelSwap" class="action-button">取消</button></div>`);
- const a=$('#swapA'),b=$('#swapB');
- if(game.players.length>1)b.value=String(game.players[1].absoluteSeat ?? game.players[1].id);
- $('#cancelSwap').onclick=()=>openMultiplayer();
- $('#confirmSwap').onclick=async()=>{
-  const first=Number(a.value),second=Number(b.value);
-  if(first===second){$('#swapError').textContent='请选择两个不同的座位';return;}
-  const wasQueued=game.phase!=='idle';
-  if(await roomOp('swapSeats',{a:first,b:second})){toast(wasQueued?'已排队，下一手开始生效':'已交换两个座位');openMultiplayer();}
- };
-}
-async function openMultiplayer(mode='join'){
+function openMultiplayer(mode='join'){
  if(online){
-  try{const fresh=await bestInviteOrigin();if(online){online.inviteOrigin=fresh;writeSession({code:online.code,token:online.token,inviteOrigin:fresh});}}catch{}
   const invite=`${(online.inviteOrigin||location.origin).replace(/\/$/,'')}/#room=${online.code}`;
-  const humanSeats=new Set(online.humanSeats||[]);
-  const hostPanel=online.host&&!online.spectator?`<div class="host-seat-manager"><h3>座位管理 <button type="button" class="text-button host-swap-button" id="openSwapSeats">⇄ 交换两人</button></h3>${game.players.map(player=>{
-   const human=humanSeats.has(player.id)||player.isHuman;
-   if(player.id===0)return `<div class="host-seat-row"><span>${player.id+1} 号 · ${lbEscape(player.name)}</span><span>你 · 房主</span></div>`;
-   return `<div class="host-seat-row"><span>${player.id+1} 号 · ${lbEscape(player.name)}</span><span class="host-seat-actions">${human?`<button type="button" class="text-button" data-kick-seat="${player.absoluteSeat ?? player.id}">踢出 → AI</button>`:`<button type="button" class="text-button" data-fill-seat="${player.absoluteSeat ?? player.id}">补/重置 AI</button><button type="button" class="text-button" data-seat-invite="${player.absoluteSeat ?? player.id}">换真人</button>`}</span></div>`;
-  }).join('')}<p class="session-note">踢出真人后该座位由 AI 接管；「换真人」会复制该 AI 座位的邀请链接，朋友打开后接替 AI 并以 2,000 买入。「补/重置 AI」把该 AI 恢复为 2,000 筹码。</p></div>`:'';
-  openModal('房间',`<div class="room-code">${online.code}</div><p id="roomMeta">${roomLine()}${online.host?' · 房主':''}${online.spectator?' · 观战':''}</p><div class="ledger-actions"><button id="copyInvite" class="action-button primary">复制邀请</button><button id="shareInvite" class="action-button">分享邀请</button>${online.spectator||online.away?'':`<button id="awayRoom" class="action-button">暂时离开</button>`}<button id="leaveRoom" class="action-button">${online.spectator?'离开观战':'彻底退出'}</button></div><p class="session-note">${online.spectator?'观战不占座，随时可以离开。':online.away?'当前座位由 AI 代打，点行动栏的「重新接管」可拿回；也可以彻底退出。':'暂时离开：座位交给 AI，保留重连凭证，可从首页「回到房间」或重新打开页面继续。</br>彻底退出：座位释放给 AI/其他玩家，凭证清除。'}</p><label class="field-label" for="inviteLink">邀请链接</label><input id="inviteLink" class="room-input" readonly><div class="invite-qr-block"><div id="inviteQr" class="invite-qr" aria-live="polite"></div><small>手机扫码直接加入</small><small class="invite-origin-note ${/^https?:\/\/(?:localhost|127\.|10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/.test(invite)?'local':''}">${/^https?:\/\/(?:localhost|127\.|10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/.test(invite)?'当前是局域网链接，外网手机请使用 npm run share 打开的公网页面建房':'公网链接，手机可以直接扫码加入'}</small></div>${hostPanel}`);
+  const seatOthers=game.players.filter(player=>player.id!==0);
+  const kickList=online.host?`<div class="host-players"><div class="host-players-title">房主管理 · 踢出座位</div>${seatOthers.length?seatOthers.map(player=>`<div class="host-player"><span>${escHtml(player.name)}<small>${player.human?(player.away?'离座真人':'真人'):(player.isHuman?'真人':'AI')} · ${fmt(player.stack)}</small></span><button type="button" class="text-button kick-btn" data-kick="${player.id}">踢出</button></div>`).join(''):'<p class="session-note">暂无其他座位</p>'}</div>`:'';
+  openModal('房间',`<div class="room-code">${online.code}</div><p id="roomMeta">${roomLine()}${online.host?' · 房主':''}${online.spectator?' · 观战':''}</p><div class="ledger-actions"><button id="copyInvite" class="action-button primary">邀请朋友</button>${online.spectator||online.away?'':`<button id="awayRoom" class="action-button">暂时离开</button>`}<button id="leaveRoom" class="action-button">${online.spectator?'离开观战':'彻底退出'}</button></div>${kickList}<p class="session-note">${online.spectator?'观战不占座，随时可以离开。':online.away?'当前座位由 AI 代打，点行动栏的「重新接管」可拿回；也可以彻底退出。':'暂时离开：座位交给 AI，保留重连凭证，可从首页「回到房间」或重新打开页面继续。</br>彻底退出：座位释放给 AI/其他玩家，凭证清除。'}</p><label class="field-label" for="inviteLink">邀请链接</label><input id="inviteLink" class="room-input" readonly>`);
   $('#inviteLink').value=invite;
   $('#copyInvite').onclick=async()=>{const input=$('#inviteLink');try{if(!navigator.clipboard?.writeText)throw Error('clipboard unavailable');await navigator.clipboard.writeText(input.value);}catch{input.focus();input.select();input.setSelectionRange?.(0,input.value.length);try{if(!document.execCommand('copy'))throw Error('copy failed');}catch{toast('请按 Ctrl/⌘+C 复制选中的链接');return;}}toast('邀请链接已复制');};
-  $('#shareInvite').onclick=async()=>{try{if(navigator.share){await navigator.share({title:'River Room 牌桌',text:'来一起打牌',url:invite});return;}}catch{}copyText(invite);};
-  renderInviteQr(invite);
+  document.querySelectorAll('[data-kick]').forEach(button=>{
+    button.onclick=async()=>{
+      const name=button.parentElement?.querySelector('span')?.textContent||'该玩家';
+      if(!window.confirm(`确定把「${name}」踢出房间？`))return;
+      const data=await roomOp('kick',{seat:Number(button.dataset.kick)});
+      if(data)openMultiplayer();
+    };
+  });
   $('#awayRoom')?.addEventListener('click',async()=>{if(await roomOp('away'))exitRoom(true);});
  $('#leaveRoom').onclick=async()=>{if(await roomOp('leave'))exitRoom();};
-  $('#openSwapSeats')?.addEventListener('click',openSeatSwap);
-  document.querySelectorAll('[data-kick-seat]').forEach(button=>button.onclick=async()=>{
-   const seat=Number(button.dataset.kickSeat),target=game.players.find(player=>(player.absoluteSeat ?? player.id)===seat);
-   openModal('踢出玩家？',`<p>把 ${lbEscape(target?.name||'该玩家')} 踢出，座位由 AI 接管。</p><div class="ledger-actions"><button id="confirmKick" class="action-button primary">确认踢出</button><button id="cancelKick" class="action-button">取消</button></div>`);
-   $('#cancelKick').onclick=()=>openMultiplayer();
-   $('#confirmKick').onclick=async()=>{if(await roomOp('kick',{seat})){toast('已踢出，座位由 AI 接管');openMultiplayer();}};
-  });
-  document.querySelectorAll('[data-fill-seat]').forEach(button=>button.onclick=async()=>{
-   const seat=Number(button.dataset.fillSeat);
-   if(await roomOp('fillAI',{seat})){toast('已补入新的 AI');openMultiplayer();}
-  });
-  document.querySelectorAll('[data-seat-invite]').forEach(button=>button.onclick=()=>copyText(seatInviteLink(Number(button.dataset.seatInvite))));
   return;
  }
  const join=mode==='join',options=setupOptions(),title=join?'加入房间':'创建房间',savedSession=readSession();
- openModal(title,`<form id="roomForm">${join&&savedSession?`<p class="session-note">上次的房间：<strong>${savedSession.code}</strong> <button type="button" class="small-link" id="resumeSavedRoom">重新接管上一局</button></p>`:''}${join?'':`<p class="session-note">${options.seatCount} 人桌 · ${levelLabels[options.aiLevel]} AI · 回合 ${turnLabel(options.turnSeconds*1000)}</p>`}<label class="field-label" for="playerNickname">昵称</label><input id="playerNickname" class="room-input" name="nickname" maxlength="12" autocomplete="nickname" value="${escapeNickname(prefs.nickname||'')}" required>${join?`<label class="field-label" for="roomCodeInput">房间码</label><input id="roomCodeInput" class="room-input" name="code" maxlength="8" autocapitalize="characters" spellcheck="false" value="${invitedRoom()}" required><div class="seat-pick" id="seatPick" hidden><div class="seat-pick-head">选择要接替的 AI 座位<small>新人固定重新买入 2,000</small></div><div id="seatPickList" class="seat-pick-list"></div></div><label class="spectate-check"><input type="checkbox" id="joinSpectate"> 只观战，不占座位</label>`:''}<p id="roomError" role="alert"></p><button class="action-button primary modal-action" id="roomSubmit">${title}</button></form>`);
+ openModal(title,`<form id="roomForm">${join&&savedSession?`<p class="session-note">上次的房间：<strong>${savedSession.code}</strong> <button type="button" class="small-link" id="resumeSavedRoom">重新接管上一局</button></p>`:''}${join?'':`<p class="session-note">${options.seatCount} 人桌 · ${levelLabels[options.aiLevel]} AI · 回合 ${turnLabel(options.turnSeconds*1000)}</p>`}<label class="field-label" for="playerNickname">昵称</label><input id="playerNickname" class="room-input" name="nickname" maxlength="12" autocomplete="nickname" required>${join?`<label class="field-label" for="roomCodeInput">房间码</label><input id="roomCodeInput" class="room-input" name="code" maxlength="8" autocapitalize="characters" spellcheck="false" value="${invitedRoom()}" required><div class="seat-pick" id="seatPick" hidden><div class="seat-pick-head">选择要接替的 AI 座位<small>新人固定重新买入 2,000</small></div><div id="seatPickList" class="seat-pick-list"></div></div><label class="spectate-check"><input type="checkbox" id="joinSpectate"> 只观战，不占座位</label>`:''}<p id="roomError" role="alert"></p><button class="action-button primary modal-action" id="roomSubmit">${title}</button></form>`);
  const form=$('#roomForm');
  $('#resumeSavedRoom')?.addEventListener('click',()=>{closeModal();restoreSavedSession();});
- let joinSeat=invitedSeat();
+ let joinSeat=null,joinReclaim=false;
  const escapeName=value=>String(value).replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
  async function loadSeats(){
   if(!join)return;
@@ -1158,15 +1039,21 @@ async function openMultiplayer(mode='join'){
    const lobby=await roomRequest('/'+code+'/lobby',null,false);
    if(($('#roomCodeInput')?.value.trim().toUpperCase()||'')!==code)return;
    const seats=lobby.players.filter(player=>player.available);
+   const awaySeats=lobby.players.filter(player=>player.away&&!player.available);
    const rows=[`<button type="button" class="seat-option ${joinSeat===null?'selected':''}" data-seat="auto">自动安排<small>随机接替一个 AI</small></button>`]
-    .concat(seats.map(player=>`<button type="button" class="seat-option ${joinSeat===player.id?'selected':''}" data-seat="${player.id}">${escapeName(player.name)}<small>${fmt(player.stack)} 筹码 · AI</small></button>`))
+    .concat(seats.map(player=>`<button type="button" class="seat-option ${joinSeat===player.id&&!joinReclaim?'selected':''}" data-seat="${player.id}" data-name="${escapeName(player.name)}">${escapeName(player.name)}<small>${fmt(player.stack)} 筹码 · AI</small></button>`))
+    .concat(awaySeats.map(player=>`<button type="button" class="seat-option reclaim ${joinSeat===player.id&&joinReclaim?'selected':''}" data-reclaim="${player.id}" data-name="${escapeName(player.name)}">重新接管 ${escapeName(player.name)}<small>${fmt(player.stack)} 筹码 · 离座 AI</small></button>`))
     .concat([`<button type="button" class="seat-option new-room" data-new-room="1">新开一个房间<small>不加入这桌</small></button>`]);
    list.innerHTML=rows.join('');
    pick.hidden=!!$('#joinSpectate')?.checked;
+   const submit=$('#roomSubmit');
+   if(submit)submit.textContent=joinSeat===null?title:joinReclaim?`重新接管 ${awaySeats.find(item=>item.id===joinSeat)?.name||'AI'} 并加入`:`接替 ${seats.find(item=>item.id===joinSeat)?.name||'AI'} 并加入`;
    list.querySelectorAll('.seat-option').forEach(button=>{
     button.onclick=()=>{
      if(button.dataset.newRoom){openMultiplayer('create');return;}
-     joinSeat=button.dataset.seat==='auto'?null:Number(button.dataset.seat);
+     if(button.dataset.reclaim){joinSeat=Number(button.dataset.reclaim);joinReclaim=true;}
+     else{joinSeat=button.dataset.seat==='auto'?null:Number(button.dataset.seat);joinReclaim=false;}
+     if(submit)submit.textContent=joinSeat===null?title:joinReclaim?`重新接管 ${button.dataset.name||'AI'} 并加入`:`接替 ${button.dataset.name||'AI'} 并加入`;
      list.querySelectorAll('.seat-option').forEach(item=>item.classList.toggle('selected',item===button));
     };
    });
@@ -1176,21 +1063,20 @@ async function openMultiplayer(mode='join'){
  }
  if(join){
   const codeInput=$('#roomCodeInput'),spectateBox=$('#joinSpectate');
-  codeInput?.addEventListener('input',()=>{joinSeat=null;loadSeats();});
-  if(spectateBox)spectateBox.onchange=()=>{const pick=$('#seatPick');if(pick)pick.hidden=spectateBox.checked;};
+  codeInput?.addEventListener('input',()=>{joinSeat=null;joinReclaim=false;loadSeats();});
+  if(spectateBox)spectateBox.onchange=()=>{const pick=$('#seatPick');if(pick)pick.hidden=spectateBox.checked;if(spectateBox.checked){const submit=$('#roomSubmit');if(submit)submit.textContent=title;}};
   loadSeats();
  }
  form.onsubmit=async event=>{
   event.preventDefault();if(connecting)return;
   const button=$('#roomSubmit'),error=$('#roomError'),name=cleanNickname($('#playerNickname').value);
   const code=join?$('#roomCodeInput').value.trim().toUpperCase():'';
-  if(name){prefs.nickname=name;savePrefs();}
   if(join&&!/^[A-Z2-9]{8}$/.test(code)){error.textContent='请输入 8 位房间码';return;}
   connecting=true;button.disabled=true;error.textContent='';
   try{
    initAudio();
    const spectate=join&&!!$('#joinSpectate')?.checked;
-   const body=join?{name,...(spectate?{spectate:true}:{}),...(!spectate&&joinSeat!==null?{seat:joinSeat}:{})}:{name,...options};
+   const body=join?{name,...(spectate?{spectate:true}:{}),...(!spectate&&joinSeat!==null?{seat:joinSeat,...(joinReclaim?{reclaim:true}:{})}:{})}:{name,...options};
    let data,inviteOrigin;
    for(let attempt=0;;attempt++){
     try{
@@ -1213,8 +1099,7 @@ async function restoreSavedSession(){
  connecting=true;
  try{
   const data=await roomRequest('/'+saved.code,undefined,saved.token);
-  const inviteOrigin=await bestInviteOrigin();
-  enterRoom({...data,token:saved.token},saved.code,inviteOrigin);
+  enterRoom({...data,token:saved.token},saved.code,saved.inviteOrigin);
  }catch{
   clearSession();toast('上次的房间已失效，请重新加入');showStart();
  }finally{connecting=false;}
@@ -1226,12 +1111,10 @@ async function restoreRoom(){
   if(saved?.code&&saved?.token&&(!invited||invited===saved.code)){
    connecting=true;
    const data=await roomRequest('/'+saved.code,undefined,saved.token);
-   const inviteOrigin=await bestInviteOrigin();
-   enterRoom({...data,token:saved.token},saved.code,inviteOrigin);return;
+   enterRoom({...data,token:saved.token},saved.code,saved.inviteOrigin);return;
   }
  }catch{stopOnline();}
  finally{connecting=false;}
  if(invited){stopOnline(true);setMode('multi');openMultiplayer('join');}
- else if(invitedHost()){stopOnline(true);setMode('multi');openMultiplayer('create');history.replaceState(null,'',location.pathname+location.search);}
 }
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',initialize,{once:true});else initialize();

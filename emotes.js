@@ -15,4 +15,4 @@ export const EMOTES = [
   { id: 'gg', emoji: '🤝', text: 'GG', cost: 10 },
   { id: 'scan', emoji: '📱', text: '扫码了', cost: 10 }
 ];
-export const EMOTE_COOLDOWN_MS = 8000;
+export const EMOTE_COOLDOWN_MS = 500;
