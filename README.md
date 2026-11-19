@@ -84,7 +84,7 @@ brew install cloudflared                              # macOS
 公网地址：https://xxxx-xxxx.trycloudflare.com
 ```
 
-脚本不会在刚拿到地址时立刻宣布成功：它会先真实访问一次；Cloudflare 分配的临时域名如果 DNS 未生效（NXDOMAIN），会自动切换到 localhost.run 备用隧道，并把验证通过的地址显示出来。创建房间后，点「房间」会显示邀请二维码，手机扫码或复制邀请链接即可。
+脚本不会在刚拿到地址时立刻宣布成功：它会先真实访问一次；Cloudflare 分配的临时域名如果 DNS 未生效（NXDOMAIN），会先切换 Pinggy，仍不可用再切 localhost.run 备用隧道，并把验证通过的地址显示出来。创建房间后，点「房间」会显示邀请二维码，手机扫码或复制邀请链接即可。
 
 注意事项：
 
@@ -143,7 +143,7 @@ npm run share
 
 - 第二次加入时昵称会自动填好，只剩一次「加入」点击。
 - 关闭终端窗口或电脑休眠后公网链接失效；重新运行 `npm run share` 会换新地址。
-- 公网地址可能是 `trycloudflare.com` 或备用 `lhr.life`；两个都属于临时隧道。若手机运营商屏蔽了其中一个，脚本会优先使用能真实访问的那个。
+- 公网地址可能是 `trycloudflare.com`、`pinggy.net` 或备用 `lhr.life`；都属于临时隧道。若手机运营商屏蔽了其中一个，脚本会优先使用能真实访问的那个。
 - 不想自动开浏览器：`npm run share -- --no-open`。
 - 想固定地址：把项目部署到云服务器，或使用自己的 Cloudflare Named Tunnel。
 

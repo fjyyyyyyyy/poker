@@ -337,6 +337,65 @@ async function main() {
     if (OPEN) openWhenReady(url + '/#host=1').catch(() => {});
   }
 
+  function launchPinggy() {
+    if (closing || announced) return;
+    if (!hasCommand('ssh')) {
+      console.error('  没有找到 ssh，无法使用 Pinggy 备用隧道，尝试 localhost.run…');
+      launchLocalhostRun();
+      return;
+    }
+    console.log('  正在通过 SSH 申请 Pinggy 备用公网地址…');
+    const child = spawn('ssh', [
+      '-p', '443',
+      '-o', 'BatchMode=yes',
+      '-o', 'StrictHostKeyChecking=accept-new',
+      '-o', 'ServerAliveInterval=30',
+      '-o', 'ExitOnForwardFailure=yes',
+      '-R0:localhost:' + PORT,
+      'a.pinggy.io'
+    ], {
+      cwd: ROOT,
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32'
+    });
+    tunnelChild = child;
+    let output = '';
+    let urlSeen = false;
+    const collect = chunk => {
+      output = (output + chunk.toString()).slice(-8192);
+      tunnelTail = output;
+      if (urlSeen || announced) return;
+      const match = output.match(/https:\/\/[a-z0-9-]+\.(?:free\.pinggy\.net|run\.pinggy-free\.link)/i);
+      if (!match) return;
+      urlSeen = true;
+      const url = match[0];
+      console.log('  Pinggy 地址已分配，正在验证公网访问…');
+      verifyPublicUrl(url).then(status => {
+        if (closing) return;
+        if (status === 'ok') { announce(url, 'Pinggy 备用隧道'); return; }
+        console.error(`  Pinggy 地址无法访问：${url}，尝试 localhost.run…`);
+        try { child.kill('SIGTERM'); } catch {}
+        launchLocalhostRun();
+      }).catch(() => {
+        try { child.kill('SIGTERM'); } catch {}
+        launchLocalhostRun();
+      });
+    };
+    child.stdout.on('data', collect);
+    child.stderr.on('data', collect);
+    child.on('exit', code => {
+      if (closing || announced || urlSeen) return;
+      console.error(`\n  Pinggy 隧道已退出（code ${code}）。`);
+      if (tunnelTail) console.error(tunnelTail.split('\n').slice(-8).map(line => '    ' + line).join('\n'));
+      launchLocalhostRun();
+    });
+    child.on('error', error => {
+      console.error('  Pinggy 启动失败：' + error.message + '，尝试 localhost.run…');
+      launchLocalhostRun();
+    });
+  }
+
   function launchLocalhostRun() {
     if (closing || announced) return;
     if (!hasCommand('ssh')) {
@@ -396,8 +455,8 @@ async function main() {
     if (closing || announced) return;
     tunnelAttempt++;
     if (tunnelAttempt > 3) {
-      console.error('\n  Cloudflare 连续分配了无法访问的地址，切换到备用隧道 localhost.run…');
-      launchLocalhostRun();
+      console.error('\n  Cloudflare 连续分配了无法访问的地址，切换到备用隧道 Pinggy…');
+      launchPinggy();
       return;
     }
     const tunnel = tunnelCommand();
@@ -442,7 +501,7 @@ async function main() {
         if (status === 'dns') {
           console.error(`  地址解析失败（DNS NXDOMAIN）：${url}`);
           console.error('  Cloudflare 当前分配的临时域名没有生效，直接切换备用隧道…');
-          setTimeout(launchLocalhostRun, 800);
+          setTimeout(launchPinggy, 800);
         } else {
           console.error(`  地址无法访问：${url}，正在重新申请…`);
           setTimeout(launchTunnel, 1000);
