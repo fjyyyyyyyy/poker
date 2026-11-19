@@ -1111,8 +1111,9 @@ function openSeatSwap(){
   if(await roomOp('swapSeats',{a:first,b:second})){toast(wasQueued?'已排队，下一手开始生效':'已交换两个座位');openMultiplayer();}
  };
 }
-function openMultiplayer(mode='join'){
+async function openMultiplayer(mode='join'){
  if(online){
+  try{const fresh=await bestInviteOrigin();if(online){online.inviteOrigin=fresh;writeSession({code:online.code,token:online.token,inviteOrigin:fresh});}}catch{}
   const invite=`${(online.inviteOrigin||location.origin).replace(/\/$/,'')}/#room=${online.code}`;
   const humanSeats=new Set(online.humanSeats||[]);
   const hostPanel=online.host&&!online.spectator?`<div class="host-seat-manager"><h3>座位管理 <button type="button" class="text-button host-swap-button" id="openSwapSeats">⇄ 交换两人</button></h3>${game.players.map(player=>{
@@ -1212,7 +1213,8 @@ async function restoreSavedSession(){
  connecting=true;
  try{
   const data=await roomRequest('/'+saved.code,undefined,saved.token);
-  enterRoom({...data,token:saved.token},saved.code,saved.inviteOrigin);
+  const inviteOrigin=await bestInviteOrigin();
+  enterRoom({...data,token:saved.token},saved.code,inviteOrigin);
  }catch{
   clearSession();toast('上次的房间已失效，请重新加入');showStart();
  }finally{connecting=false;}
@@ -1224,7 +1226,8 @@ async function restoreRoom(){
   if(saved?.code&&saved?.token&&(!invited||invited===saved.code)){
    connecting=true;
    const data=await roomRequest('/'+saved.code,undefined,saved.token);
-   enterRoom({...data,token:saved.token},saved.code,saved.inviteOrigin);return;
+   const inviteOrigin=await bestInviteOrigin();
+   enterRoom({...data,token:saved.token},saved.code,inviteOrigin);return;
   }
  }catch{stopOnline();}
  finally{connecting=false;}
