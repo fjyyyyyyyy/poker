@@ -762,8 +762,8 @@ function openLeaderboard(tab='win'){
  const list=$('#lbList');
  const render=()=>{list.innerHTML=lbRows(tab);bindLbRows();};
  document.querySelectorAll('[data-lb-tab]').forEach(button=>button.onclick=()=>{tab=button.dataset.lbTab;document.querySelectorAll('[data-lb-tab]').forEach(item=>item.classList.toggle('selected',item===button));render();});
- if(leaderboardCache){render();return;}
- fetch('/api/leaderboard',{signal:AbortSignal.timeout?.(12000)}).then(response=>{if(!response.ok)throw Error('联机服务暂时不可用');return response.json();}).then(data=>{leaderboardCache={wins:data.wins||[],hands:data.hands||[]};render();}).catch(error=>{list.innerHTML=`<p class="lb-empty">${lbEscape(error.message||'排行榜暂时不可用')}</p>`;});
+ if(leaderboardCache)render();
+ fetch('/api/leaderboard',{signal:AbortSignal.timeout?.(12000)}).then(response=>{if(!response.ok)throw Error('联机服务暂时不可用');return response.json();}).then(data=>{leaderboardCache={wins:data.wins||[],hands:data.hands||[]};render();}).catch(error=>{if(!leaderboardCache)list.innerHTML=`<p class="lb-empty">${lbEscape(error.message||'排行榜暂时不可用')}</p>`;});
 }
 function openLbDetail(kind,index){
  const entry=(kind==='win'?leaderboardCache?.wins:leaderboardCache?.hands)?.[index];if(!entry)return;
@@ -882,7 +882,7 @@ function initialize(){
  for(const id of ['#multiplayerButton','#multiplayerTopButton'])if($(id))$(id).onclick=()=>openMultiplayer();
  $('#closeModal').onclick=closeModal;
  dialog.addEventListener('click',e=>{if(e.target===dialog){const r=dialog.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)closeModal();}});
- $$('[data-nav]').forEach(b=>b.onclick=()=>{const type=b.dataset.nav;if(type==='table'){closeModal();return;}({history:openHistory,players:openProfiles,settings:openSettings})[type]();});
+ $$('[data-nav]').forEach(b=>b.onclick=()=>{const type=b.dataset.nav;if(type==='table'){closeModal();return;}({history:openHistory,players:openProfiles,leaderboard:openLeaderboard,settings:openSettings})[type]();});
  $$('[data-tab]').forEach(b=>b.onclick=()=>{sideTab=b.dataset.tab;$$('[data-tab]').forEach(x=>x.classList.toggle('selected',x===b));renderSide();});
  hiddenSidebar.addEventListener('change',renderSide);
  document.addEventListener('click',e=>{if(e.target.closest('#panelHistory'))openHistory();});
