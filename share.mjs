@@ -19,22 +19,25 @@
  *   SHARE_TIMEOUT_MS=180000  等待公网地址的最长时间
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { accessSync, constants, existsSync, readdirSync } from 'node:fs';
+import { accessSync, constants, existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
-const PORT = Number(process.env.PORT) || 8787;
+let PORT = Number(process.env.PORT) || 8787;
 const OPEN = !process.argv.includes('--no-open');
-const LOCAL = `http://127.0.0.1:${PORT}`;
-const INFO = `${LOCAL}/api/server-info`;
+let LOCAL = `http://127.0.0.1:${PORT}`;
+let INFO = `${LOCAL}/api/server-info`;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const WAIT_MS = Number(process.env.SHARE_TIMEOUT_MS) || 180000;
+const PUBLIC_ORIGIN_FILE = join(ROOT, '.public-origin');
+let publicUrl = '';
 const startedAt = Date.now();
 
 let serverChild = null;
 let tunnelChild = null;
+let serverRestarting = false;
 let closing = false;
 let tunnelTail = '';
 
@@ -54,6 +57,9 @@ function killTree(child) {
 function shutdown(code = 0) {
   if (closing) return;
   closing = true;
+  try {
+    if (publicUrl && readFileSync(PUBLIC_ORIGIN_FILE, 'utf8').trim() === publicUrl) unlinkSync(PUBLIC_ORIGIN_FILE);
+  } catch { /* nothing to clean */ }
   killTree(tunnelChild);
   if (serverChild) killTree(serverChild);
   setTimeout(() => process.exit(code), 250);
@@ -70,10 +76,24 @@ process.on('SIGHUP', () => {
   shutdown(0);
 });
 
-async function serverIsUp() {
+async function fetchServerInfo(port = PORT) {
   try {
-    const response = await fetch(INFO, { signal: AbortSignal.timeout(1500) });
-    return response.ok;
+    const response = await fetch(`http://127.0.0.1:${port}/api/server-info`, { signal: AbortSignal.timeout(1500) });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+async function serverIsUp() {
+  return !!(await fetchServerInfo());
+}
+
+async function portHasService(port) {
+  try {
+    await fetch(`http://127.0.0.1:${port}/api/server-info`, { signal: AbortSignal.timeout(600) });
+    return true;
   } catch {
     return false;
   }
@@ -131,10 +151,50 @@ function printInstallHelp() {
   console.error('');
 }
 
+async function restartServerChild() {
+  if (serverRestarting || closing) return;
+  serverRestarting = true;
+  serverChild = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    if (closing) return;
+    await sleep(800 * attempt);
+    console.log(`  游戏服务意外中断，正在自动恢复（第 ${attempt}/3 次）…`);
+    if (await startServerIfNeeded()) {
+      console.log('  游戏服务已自动恢复，房间会从持久化快照继续。');
+      serverRestarting = false;
+      return;
+    }
+  }
+  serverRestarting = false;
+  console.error('  游戏服务多次恢复失败，已停止公网隧道。');
+  shutdown(1);
+}
+
 async function startServerIfNeeded() {
-  if (await serverIsUp()) {
-    console.log(`  检测到 ${LOCAL} 已在运行，直接建立公网隧道。`);
+  const existing = await fetchServerInfo();
+  if (existing?.capabilities?.publicOrigin) {
+    console.log(`  检测到 ${LOCAL} 已在运行最新服务，直接建立公网隧道。`);
     return true;
+  }
+  if (existing) {
+    console.log(`  检测到 ${LOCAL} 是旧版/其他服务，不会复用它；正在另选端口启动最新版…`);
+    for (let candidate = PORT + 1; candidate < PORT + 20; candidate++) {
+      if (!(await portHasService(candidate))) {
+        PORT = candidate;
+        LOCAL = `http://127.0.0.1:${PORT}`;
+        INFO = `${LOCAL}/api/server-info`;
+        console.log(`  最新服务端口：${PORT}`);
+        break;
+      }
+    }
+    if (PORT === Number(process.env.PORT) || !(await portHasService(PORT))) {
+      // If all candidate checks were inconclusive, still try the next port.
+      if (PORT === Number(process.env.PORT)) {
+        PORT += 1;
+        LOCAL = `http://127.0.0.1:${PORT}`;
+        INFO = `${LOCAL}/api/server-info`;
+      }
+    }
   }
   console.log(`  启动游戏服务 ${LOCAL} …`);
   serverChild = spawn(process.execPath, ['server.mjs'], {
@@ -146,9 +206,12 @@ async function startServerIfNeeded() {
   for (let i = 0; i < 80; i++) {
     if (await serverIsUp()) {
       serverChild.on('exit', code => {
-        if (closing) return;
+        if (closing || serverRestarting) return;
         console.error(`  游戏服务意外退出（code ${code}）。`);
-        shutdown(1);
+        restartServerChild().catch(error => {
+          console.error('  自动恢复失败：', error.message);
+          shutdown(1);
+        });
       });
       return true;
     }
@@ -215,16 +278,16 @@ async function main() {
   console.log('  River Room · 公网联机助手');
   console.log('  ────────────────────────────────────────────');
 
-  const tunnel = tunnelCommand();
-  if (!tunnel) {
-    printInstallHelp();
+  if (!(await startServerIfNeeded())) {
+    console.error(`  游戏服务没能启动，请检查 ${PORT} 端口是否被占用。`);
+    console.error(`  换端口：PORT=8788 npm run share`);
     shutdown(1);
     return;
   }
 
-  if (!(await startServerIfNeeded())) {
-    console.error(`  游戏服务没能启动，请检查 ${PORT} 端口是否被占用。`);
-    console.error(`  换端口：PORT=8788 npm run share`);
+  const tunnel = tunnelCommand();
+  if (!tunnel) {
+    printInstallHelp();
     shutdown(1);
     return;
   }
@@ -261,6 +324,8 @@ async function main() {
     const match = output.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/i);
     if (!match) return;
     announced = true;
+    publicUrl = match[0];
+    try { writeFileSync(PUBLIC_ORIGIN_FILE, publicUrl + '\n'); } catch { /* invite falls back to LAN */ }
     clearInterval(progress);
     console.log('');
     console.log('  ────────────────────────────────────────────');

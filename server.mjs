@@ -14,7 +14,8 @@
  * 房间数据保存在内存里，进程重启即清空。
  */
 import { createServer } from 'node:http';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, rename, writeFile } from 'node:fs/promises';
+import { renameSync, writeFileSync } from 'node:fs';
 import { gzipSync } from 'node:zlib';
 import { randomBytes } from 'node:crypto';
 import { networkInterfaces } from 'node:os';
@@ -27,6 +28,8 @@ import { evaluate } from './evaluator.js';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const LEADERBOARD_FILE = resolve(ROOT, '.leaderboard.json');
+const PUBLIC_ORIGIN_FILE = resolve(ROOT, '.public-origin');
+const ROOMS_FILE = process.env.ROOMS_FILE ? resolve(process.env.ROOMS_FILE) : resolve(ROOT, '.rooms.json');
 const PORT = Number(process.env.PORT) || 8787;
 const HOST = process.env.HOST || '0.0.0.0';
 
@@ -67,6 +70,9 @@ const MIME = {
 
 const rooms = new Map();
 let recentLeaderboard = [];
+let saveRoomsTimer = null;
+let roomsSaving = false;
+let roomsDirty = false;
 
 class HttpError extends Error {
   constructor(status, message, extra = {}) {
@@ -140,6 +146,7 @@ function createRoom({ name, seatCount, aiLevel, turnSeconds = 30 }) {
     nextDealAt: 0,
     aiMemory: {},
     emoteCooldowns: {},
+    pendingSwaps: [],
     recent: new Map(),      // token:requestId -> 时间，用于请求去重
     createdAt: Date.now(),
     lastActivity: Date.now()
@@ -204,6 +211,7 @@ function removeHuman(room, token) {
   if (player) player.isHuman = false;
   if (room.humans.size === 0) {
     rooms.delete(room.code);
+    scheduleSaveRooms();
     return;
   }
   if (room.hostSeat === human.seat) {
@@ -211,6 +219,120 @@ function removeHuman(room, token) {
     room.hostSeat = next.seat;
   }
   bump(room);
+}
+
+function gameSnapshot(game) {
+  const { random, ...data } = game;
+  return data;
+}
+
+function roomSnapshot(room) {
+  return {
+    code: room.code,
+    game: gameSnapshot(room.game),
+    humans: [...room.humans.entries()],
+    spectators: [...room.spectators.entries()],
+    recent: [...room.recent.entries()],
+    hostSeat: room.hostSeat,
+    turnMs: room.turnMs,
+    version: room.version,
+    turnKey: room.turnKey,
+    aiMemory: room.aiMemory,
+    emoteCooldowns: room.emoteCooldowns,
+    pendingSwaps: room.pendingSwaps,
+    createdAt: room.createdAt,
+    lastActivity: room.lastActivity,
+    lastLeaderboardKey: room.lastLeaderboardKey
+  };
+}
+
+function restoreGame(data) {
+  if (!data || !Array.isArray(data.players) || data.players.length < 2) return null;
+  const game = new Game({ seatCount: data.players.length, aiLevel: data.aiLevel || 'normal', stack: data.buyin || 2000 });
+  Object.assign(game, data);
+  return game;
+}
+
+function restoreRoom(data) {
+  if (!data || typeof data.code !== 'string') return null;
+  const game = restoreGame(data.game);
+  if (!game) return null;
+  const room = {
+    code: data.code,
+    game,
+    turnMs: data.turnMs || 30000,
+    version: Number.isFinite(data.version) ? data.version : 0,
+    humans: new Map(Array.isArray(data.humans) ? data.humans : []),
+    spectators: new Map(Array.isArray(data.spectators) ? data.spectators : []),
+    hostSeat: Number.isInteger(data.hostSeat) ? data.hostSeat : 0,
+    turnKey: typeof data.turnKey === 'string' ? data.turnKey : '',
+    actorSince: Date.now(),
+    nextThinkAt: 0,
+    nextDealAt: 0,
+    aiMemory: data.aiMemory && typeof data.aiMemory === 'object' ? data.aiMemory : {},
+    emoteCooldowns: data.emoteCooldowns && typeof data.emoteCooldowns === 'object' ? data.emoteCooldowns : {},
+    pendingSwaps: Array.isArray(data.pendingSwaps) ? data.pendingSwaps : [],
+    recent: new Map(Array.isArray(data.recent) ? data.recent : []),
+    createdAt: Number.isFinite(data.createdAt) ? data.createdAt : Date.now(),
+    lastActivity: Date.now(),
+    lastLeaderboardKey: data.lastLeaderboardKey
+  };
+  for (const human of room.humans.values()) {
+    if (!human.away) human.lastSeen = Date.now();
+  }
+  room.version = (room.version || 0) + 1;
+  room.turnKey = `${game.sessionId}.${game.hand}.${game.events.length}.${game.actor ?? '-'}`;
+  return room;
+}
+
+async function loadRooms() {
+  let parsed;
+  try {
+    parsed = JSON.parse(await readFile(ROOMS_FILE, 'utf8'));
+  } catch {
+    return;
+  }
+  if (!Array.isArray(parsed)) return;
+  const now = Date.now();
+  for (const item of parsed) {
+    try {
+      if (!item || now - Number(item.lastActivity) > IDLE_TTL_MS || now - Number(item.createdAt) > MAX_TTL_MS) continue;
+      const room = restoreRoom(item);
+      if (room && !rooms.has(room.code)) rooms.set(room.code, room);
+    } catch (error) {
+      console.warn('[river] 恢复房间失败：', error.message);
+    }
+  }
+  if (rooms.size) console.log(`[river] 已恢复 ${rooms.size} 个房间`);
+}
+
+function scheduleSaveRooms() {
+  roomsDirty = true;
+  if (saveRoomsTimer) return;
+  saveRoomsTimer = setTimeout(() => {
+    saveRoomsTimer = null;
+    flushRooms().catch(error => console.error('[river] 保存房间失败：', error.message));
+  }, 180);
+  saveRoomsTimer.unref?.();
+}
+
+async function flushRooms() {
+  if (roomsSaving) { roomsDirty = true; return; }
+  if (!roomsDirty) return;
+  roomsSaving = true;
+  roomsDirty = false;
+  try {
+    const tempFile = `${ROOMS_FILE}.tmp`;
+    const payload = JSON.stringify([...rooms.values()].map(roomSnapshot));
+    await writeFile(tempFile, payload);
+    await rename(tempFile, ROOMS_FILE);
+  } catch (error) {
+    roomsDirty = true;
+    throw error;
+  } finally {
+    roomsSaving = false;
+    if (roomsDirty && !saveRoomsTimer) scheduleSaveRooms();
+  }
 }
 
 async function loadLeaderboard() {
@@ -345,6 +467,27 @@ function seatHuman(room, seat, name) {
   player.stats = { hands: 0, vpip: 0, pfr: 0, raises: 0, calls: 0, folds: 0, faced: 0, foldToBet: 0, showdowns: 0, shownBluffs: 0 };
 }
 
+function swapSeatState(room, a, b) {
+  const game = room.game;
+  if (!Number.isInteger(a) || !Number.isInteger(b) || a === b) return false;
+  if (a < 0 || b < 0 || a >= game.players.length || b >= game.players.length) return false;
+  [game.players[a], game.players[b]] = [game.players[b], game.players[a]];
+  game.players[a].id = a;
+  game.players[b].id = b;
+  if (Array.isArray(game.personalities)) {
+    [game.personalities[a], game.personalities[b]] = [game.personalities[b], game.personalities[a]];
+  }
+  for (const human of room.humans.values()) {
+    if (human.seat === a) human.seat = b;
+    else if (human.seat === b) human.seat = a;
+  }
+  if (room.hostSeat === a) room.hostSeat = b;
+  else if (room.hostSeat === b) room.hostSeat = a;
+  [room.aiMemory[a], room.aiMemory[b]] = [room.aiMemory[b], room.aiMemory[a]];
+  [room.emoteCooldowns[a], room.emoteCooldowns[b]] = [room.emoteCooldowns[b], room.emoteCooldowns[a]];
+  return true;
+}
+
 function resetGame(room) {
   const humans = [...room.humans.values()];
   const { seatCount, aiLevel } = room.game;
@@ -359,6 +502,7 @@ function resetGame(room) {
   room.game = game;
   room.aiMemory = {};
   room.emoteCooldowns = {};
+  room.pendingSwaps = [];
   room.recent.clear();
 }
 
@@ -385,6 +529,7 @@ function buildState(room, seat, spectator = false) {
     const player = game.players[i];
     players[map(i)] = {
       id: map(i),
+      absoluteSeat: i,
       name: player.name,
       stack: player.stack,
       debt: player.debt,
@@ -583,11 +728,14 @@ function tick() {
 
 function cleanup() {
   const now = Date.now();
+  let removed = false;
   for (const room of rooms.values()) {
     if (now - room.lastActivity > IDLE_TTL_MS || now - room.createdAt > MAX_TTL_MS) {
       rooms.delete(room.code);
+      removed = true;
     }
   }
+  if (removed) scheduleSaveRooms();
 }
 
 /* ------------------------------------------------------------------ *
@@ -784,6 +932,19 @@ async function handleApi(req, res, url, segments) {
 
   if (op === 'reclaim') {
     reclaimHuman(room, human);
+  } else if (op === 'swapSeats') {
+    if (!isHost) throw new HttpError(403, '只有房主可以交换位置');
+    const a = Number(body.a);
+    const b = Number(body.b);
+    if (!Number.isInteger(a) || !Number.isInteger(b) || a < 0 || b < 0 || a >= game.players.length || b >= game.players.length) {
+      throw new HttpError(400, '座位不存在');
+    }
+    if (a === b) throw new HttpError(400, '请选择两个不同的座位');
+    if (game.phase === 'idle') {
+      swapSeatState(room, a, b);
+    } else {
+      room.pendingSwaps.push([a, b]);
+    }
   } else if (op === 'kick') {
     if (!isHost) throw new HttpError(403, '只有房主可以踢出玩家');
     const seat = Number(body.seat);
@@ -817,6 +978,10 @@ async function handleApi(req, res, url, segments) {
   } else if (op === 'start') {
     if (!isHost) throw new HttpError(403, '只有房主可以开始牌局');
     if (!['idle', 'complete'].includes(game.phase)) throw new HttpError(409, '牌局正在进行中');
+    if (room.pendingSwaps.length) {
+      for (const [a, b] of room.pendingSwaps) swapSeatState(room, a, b);
+      room.pendingSwaps = [];
+    }
     game.refillBusted(humanSeats(room));
     game.startHand();
   } else if (op === 'action') {
@@ -924,9 +1089,16 @@ async function handle(req, res) {
     if (segments[1] === 'server-info') {
       if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, '不支持的请求方法');
       const port = server.address()?.port || PORT;
+      let publicOrigin = '';
+      try {
+        const candidate = (await readFile(PUBLIC_ORIGIN_FILE, 'utf8')).trim();
+        if (/^https?:\/\/\S+$/.test(candidate)) publicOrigin = candidate.replace(/\/$/, '');
+      } catch { /* no active public share */ }
       sendJson(req, res, 200, {
         urls: lanUrls(port),
         port,
+        publicOrigin,
+        capabilities: { publicOrigin: true, maxSeats: 10 },
         origin: `${req.headers['x-forwarded-proto'] || (req.socket.encrypted ? 'https' : 'http')}://${req.headers.host}`
       });
       return;
@@ -967,6 +1139,7 @@ server.on('error', error => {
 });
 
 await loadLeaderboard();
+await loadRooms();
 
 server.listen(PORT, HOST, () => {
   const port = server.address().port;
@@ -977,14 +1150,29 @@ server.listen(PORT, HOST, () => {
     for (const address of lanUrls(port)) console.log(`  局域网:   ${address}`);
     console.log('  同一 Wi-Fi 下的朋友打开局域网地址即可加入。');
   }
-  console.log('  房间数据保存在内存中，重启服务会清空。按 Ctrl+C 停止。');
+  console.log('  房间和当前牌局会自动保存，重启后可恢复。按 Ctrl+C 停止。');
   console.log('');
 });
 
-setInterval(tick, TICK_MS);
-setInterval(cleanup, 60000);
-process.on('SIGINT', () => {
+setInterval(() => { try { tick(); } catch (error) { console.error('[river] tick 异常：', error); } }, TICK_MS);
+setInterval(() => { try { cleanup(); } catch (error) { console.error('[river] cleanup 异常：', error); } }, 60000);
+function saveRoomsSync() {
+  try {
+    const tempFile = `${ROOMS_FILE}.tmp`;
+    writeFileSync(tempFile, JSON.stringify([...rooms.values()].map(roomSnapshot)));
+    renameSync(tempFile, ROOMS_FILE);
+  } catch (error) {
+    console.warn('[river] 退出前保存房间失败：', error.message);
+  }
+}
+
+function shutdownServer() {
   console.log('\n正在关闭 River Room 联机服务…');
+  saveRoomsSync();
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 1500).unref();
-});
+}
+process.on('SIGINT', shutdownServer);
+process.on('SIGTERM', shutdownServer);
+process.on('uncaughtException', error => console.error('[river] 未捕获异常：', error));
+process.on('unhandledRejection', error => console.error('[river] 未处理 Promise：', error));

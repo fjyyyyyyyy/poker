@@ -1196,3 +1196,15 @@ dialog{width:min(660px,calc(100vw - 32px));padding:26px;max-height:88vh}.modal-t
 .invite-qr-block small{font-size:10px;color:#8b9a80}
 .qr-placeholder{font-size:10px;color:#8b9a80;text-align:center;padding:8px;line-height:1.5}
 @media(max-width:650px){.invite-qr{width:132px;height:132px}.invite-qr-block{padding:7px;margin:10px 0 2px}}
+.invite-origin-note{max-width:190px;text-align:center;line-height:1.5}
+.invite-origin-note.local{color:#a35b45}
+
+/* Swap seats */
+.host-seat-manager h3{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.host-swap-button{font-size:11px!important;min-height:27px;padding:3px 6px!important;color:#4f724b!important;white-space:nowrap}
+.swap-note{font-size:12px;color:#718368;line-height:1.6;margin:0 0 12px}
+.swap-selects{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:8px 0 4px}
+.swap-selects label{display:flex;flex-direction:column;gap:5px;font-size:11px;color:#718368}
+.swap-selects select{width:100%;padding:9px 8px;border:1px solid #d9e3d1;border-radius:7px;background:#fff;color:#3d5738;font-size:13px}
+.swap-error{min-height:16px;font-size:11px;color:#a34c3b;margin:4px 0 0}
+@media(max-width:650px){.host-swap-button{font-size:10px!important}.swap-selects{grid-template-columns:1fr}}

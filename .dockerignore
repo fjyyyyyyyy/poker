@@ -8,3 +8,5 @@ npm-debug.log*
 启动联机.command
 
 .leaderboard.json
+
+.rooms.json
