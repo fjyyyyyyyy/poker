@@ -11,7 +11,7 @@
  *   - 维护房间与权威牌局状态，替 AI 座位行动
  *   - 按每位玩家的视角重排座位（自己永远是 0 号座），并且只下发自己的底牌
  *
- * 房间数据保存在内存里，进程重启即清空。
+ * 房间、牌局与最近聊天记录随房间快照保存，可在进程重启后恢复。
  */
 import { createServer } from 'node:http';
 import { readFile, rename, writeFile } from 'node:fs/promises';
@@ -23,6 +23,7 @@ import { dirname, extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Game, AI_LEVELS, MIN_SEATS, MAX_SEATS, TURN_LIMIT_MS } from './engine.js';
 import { EMOTES, EMOTE_COOLDOWN_MS } from './emotes.js';
+import { CHAT_MAX_LENGTH, CHAT_HISTORY_LIMIT, CHAT_COOLDOWN_MS, cleanChatText } from './chat-rules.js';
 import { decide } from './ai.js';
 import { evaluate } from './evaluator.js';
 
@@ -148,6 +149,9 @@ function createRoom({ name, seatCount, aiLevel, turnSeconds = 30 }) {
     emoteCooldowns: {},
     pendingSwaps: [],
     recent: new Map(),      // token:requestId -> 时间，用于请求去重
+    chatVersion: 0,
+    chatMessages: [],
+    chatRecent: new Map(),
     createdAt: Date.now(),
     lastActivity: Date.now()
   };
@@ -162,7 +166,7 @@ function addHuman(room, seat, name) {
   const player = room.game.players[seat];
   player.name = name;
   player.isHuman = true;
-  room.humans.set(token, { seat, name, joinedAt: Date.now(), lastSeen: Date.now() });
+  room.humans.set(token, { seat, name, chatId: randomBytes(12).toString('base64url'), joinedAt: Date.now(), lastSeen: Date.now() });
   return token;
 }
 
@@ -233,6 +237,9 @@ function roomSnapshot(room) {
     humans: [...room.humans.entries()],
     spectators: [...room.spectators.entries()],
     recent: [...room.recent.entries()],
+    chatVersion: room.chatVersion,
+    chatMessages: room.chatMessages,
+    chatRecent: [...room.chatRecent.entries()],
     hostSeat: room.hostSeat,
     turnMs: room.turnMs,
     version: room.version,
@@ -273,13 +280,18 @@ function restoreRoom(data) {
     emoteCooldowns: data.emoteCooldowns && typeof data.emoteCooldowns === 'object' ? data.emoteCooldowns : {},
     pendingSwaps: Array.isArray(data.pendingSwaps) ? data.pendingSwaps : [],
     recent: new Map(Array.isArray(data.recent) ? data.recent : []),
+    chatVersion: Number.isFinite(data.chatVersion) ? data.chatVersion : 0,
+    chatMessages: Array.isArray(data.chatMessages) ? data.chatMessages.slice(-CHAT_HISTORY_LIMIT) : [],
+    chatRecent: new Map(Array.isArray(data.chatRecent) ? data.chatRecent.slice(-300) : []),
     createdAt: Number.isFinite(data.createdAt) ? data.createdAt : Date.now(),
     lastActivity: Date.now(),
     lastLeaderboardKey: data.lastLeaderboardKey
   };
   for (const human of room.humans.values()) {
+    human.chatId ||= randomBytes(12).toString('base64url');
     if (!human.away) human.lastSeen = Date.now();
   }
+  for (const watcher of room.spectators.values()) watcher.chatId ||= randomBytes(12).toString('base64url');
   room.version = (room.version || 0) + 1;
   room.turnKey = `${game.sessionId}.${game.hand}.${game.events.length}.${game.actor ?? '-'}`;
   return room;
@@ -510,7 +522,44 @@ function resetGame(room) {
  * 视角状态：把请求者的座位旋转到 0 号座，客户端只认识这个视角
  * ------------------------------------------------------------------ */
 
-function buildState(room, seat, spectator = false) {
+function buildChat(room, token) {
+  const member = room.humans.get(token) || room.spectators.get(token);
+  return {
+    version: room.chatVersion,
+    messages: room.chatMessages.map(({ senderId, ...message }) => ({ ...message, own: senderId === member?.chatId }))
+  };
+}
+
+function sendChat(room, token, body) {
+  const member = room.humans.get(token) || room.spectators.get(token);
+  const requestId = typeof body.requestId === 'string' ? body.requestId : '';
+  if (!requestId || requestId.length > 100) throw new HttpError(400, '消息缺少有效的请求编号');
+  const key = `${token}:${requestId}`;
+  // An acknowledged retry must not publish or charge the cooldown twice.
+  if (room.chatRecent.has(key)) return;
+  const text = cleanChatText(body.text);
+  if (!text) throw new HttpError(400, '请输入消息内容');
+  if (text.length > CHAT_MAX_LENGTH) throw new HttpError(400, `消息最多 ${CHAT_MAX_LENGTH} 字`);
+  const now = Date.now();
+  if (now - (member.chatAt || 0) < CHAT_COOLDOWN_MS) throw new HttpError(429, '发送太快了，请稍等一秒');
+  room.chatMessages.push({
+    id: ++room.chatVersion,
+    senderId: member.chatId,
+    name: member.name,
+    spectator: room.spectators.has(token),
+    text,
+    time: now
+  });
+  if (room.chatMessages.length > CHAT_HISTORY_LIMIT) room.chatMessages.shift();
+  member.chatAt = now;
+  room.chatRecent.set(key, now);
+  while (room.chatRecent.size > 300) room.chatRecent.delete(room.chatRecent.keys().next().value);
+  // Chat does not bump the game version or reset the turn / AI / dealing timers.
+  room.lastActivity = now;
+  scheduleSaveRooms();
+}
+
+function buildState(room, seat, spectator = false, token = '') {
   const game = room.game;
   const count = game.players.length;
   const viewer = spectator ? null : [...room.humans.values()].find(human => human.seat === seat);
@@ -609,6 +658,7 @@ function buildState(room, seat, spectator = false) {
   return {
     code: room.code,
     version: room.version,
+    chat: buildChat(room, token),
     host: !spectator && room.hostSeat === seat,
     spectator,
     away,
@@ -829,7 +879,7 @@ async function handleApi(req, res, url, segments) {
     const turnSeconds = Number(body.turnSeconds ?? 30);
     if (!TURN_OPTIONS.includes(turnSeconds)) throw new HttpError(400, '回合时间不在可选范围内');
     const { room, token } = createRoom({ name: cleanName(body.name), seatCount, aiLevel, turnSeconds });
-    sendJson(req, res, 200, { token, state: buildState(room, 0) });
+    sendJson(req, res, 200, { token, state: buildState(room, 0, false, token) });
     return;
   }
 
@@ -864,9 +914,9 @@ async function handleApi(req, res, url, segments) {
     const body = await readJson(req);
     if (body.spectate) {
       const token = randomBytes(24).toString('base64url');
-      room.spectators.set(token, { name: cleanName(body.name), joinedAt: Date.now(), lastSeen: Date.now() });
+      room.spectators.set(token, { name: cleanName(body.name), chatId: randomBytes(12).toString('base64url'), joinedAt: Date.now(), lastSeen: Date.now() });
       room.lastActivity = Date.now();
-      sendJson(req, res, 200, { token, spectator: true, state: buildState(room, 0, true) });
+      sendJson(req, res, 200, { token, spectator: true, state: buildState(room, 0, true, token) });
       return;
     }
     if (room.game.phase === 'dealing') {
@@ -890,20 +940,21 @@ async function handleApi(req, res, url, segments) {
     seatHuman(room, seat, name);
     const token = addHuman(room, seat, name);
     bump(room);
-    sendJson(req, res, 200, { token, state: buildState(room, seat) });
+    sendJson(req, res, 200, { token, state: buildState(room, seat, false, token) });
     return;
   }
 
   if (segments[3]) throw new HttpError(404, '接口不存在');
 
   if (method === 'GET' || method === 'HEAD') {
-    const { room, human, spectator } = authRoom(req, code);
+    const { room, human, spectator, token } = authRoom(req, code);
     const seat = human ? human.seat : 0;
     const since = Number(url.searchParams.get('since'));
     if (Number.isFinite(since) && since === room.version) {
-      sendJson(req, res, 200, { unchanged: true });
+      const chatSince = Number(url.searchParams.get('chatSince') ?? -1);
+      sendJson(req, res, 200, { unchanged: true, ...(chatSince === room.chatVersion ? {} : { chat: buildChat(room, token) }) });
     } else {
-      sendJson(req, res, 200, { state: buildState(room, seat, spectator) });
+      sendJson(req, res, 200, { state: buildState(room, seat, spectator, token) });
     }
     return;
   }
@@ -918,12 +969,17 @@ async function handleApi(req, res, url, segments) {
     sendJson(req, res, 200, { ok: true });
     return;
   }
+  if (op === 'chat') {
+    sendChat(room, token, body);
+    sendJson(req, res, 200, { chat: buildChat(room, token) });
+    return;
+  }
   if (spectator) throw new HttpError(403, '观战模式不能操作牌局');
   if (human.away && op !== 'reclaim' && op !== 'away') throw new HttpError(409, '座位暂由 AI 代打，请先点“重新接管”');
   const requestId = body.requestId ? String(body.requestId) : '';
   const dedupeKey = requestId ? `${token}:${requestId}` : '';
   if (dedupeKey && room.recent.has(dedupeKey)) {
-    sendJson(req, res, 200, { state: buildState(room, human.seat) });
+    sendJson(req, res, 200, { state: buildState(room, human.seat, false, token) });
     return;
   }
 
@@ -1019,7 +1075,7 @@ async function handleApi(req, res, url, segments) {
     room.recent.set(dedupeKey, Date.now());
     while (room.recent.size > 300) room.recent.delete(room.recent.keys().next().value);
   }
-  sendJson(req, res, 200, { state: buildState(room, human.seat) });
+  sendJson(req, res, 200, { state: buildState(room, human.seat, false, token) });
 }
 
 async function serveStatic(req, res, pathname) {

@@ -7,7 +7,7 @@
   <meta name="description" content="River Room 德州练习室。支持单人练习与联网联机，2–10 人桌，可与朋友在同一房间同桌竞技。">
   <title>River Room · 德州练习室</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23162e27'/%3E%3Ctext x='32' y='47' text-anchor='middle' font-size='46' fill='%23d8bb7b'%3E♠%3C/text%3E%3C/svg%3E">
-  <link rel="stylesheet" href="style.css?v=29">
+  <link rel="stylesheet" href="style.css?v=31">
 </head>
 <body>
   <div class="start-screen" id="startScreen">
@@ -126,6 +126,20 @@
             <div class="table-toolbar">
               <div class="blind-label">盲注 <strong>10 / 20</strong></div>
               <div class="street-status" id="streetStatus">等待开始</div>
+              <button id="chatButton" class="chat-button" type="button" aria-controls="chatPanel" aria-expanded="false" aria-label="房间聊天" hidden>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6 4V6a2 2 0 0 1 2-2Z"/><path d="M7 9h10M7 13h6"/></svg>
+                <span>聊天</span><b id="chatUnread" class="chat-unread" hidden></b>
+              </button>
+              <section id="chatPanel" class="chat-panel" aria-labelledby="chatTitle" hidden>
+                <div class="chat-head"><div><span id="chatRoomCode" class="chat-room-code"></span><h2 id="chatTitle">房间聊天</h2></div><button id="chatClose" class="chat-close" type="button" aria-label="收起房间聊天">×</button></div>
+                <ol id="chatMessages" class="chat-messages" role="log" aria-label="房间消息" aria-live="polite" aria-relevant="additions" tabindex="0"></ol>
+                <button id="chatNewMessages" class="chat-new-messages" type="button" hidden></button>
+                <form id="chatForm" class="chat-form">
+                  <div class="chat-compose"><label for="chatInput" class="chat-sr-only">发送房间消息</label><input id="chatInput" name="message" type="text" placeholder="和同桌聊两句…" autocomplete="off" enterkeyhint="send" aria-describedby="chatConnection chatCount chatError"><button id="chatSend" type="submit" disabled>发送</button></div>
+                  <div class="chat-hint"><span id="chatConnection">房间内可见 · 免费聊天</span><span id="chatCount">0/200</span></div>
+                  <p id="chatError" class="chat-error" role="status"></p>
+                </form>
+              </section>
               <button id="emoteButton" class="emote-button" type="button" aria-expanded="false" title="发表情">😀 <span>表情</span></button>
               <div class="emote-panel" id="emotePanel" hidden>
                 <div class="emote-head"><strong>表情</strong><span id="emoteBalance"></span><small id="emoteCooldown"></small></div>
@@ -162,7 +176,7 @@
             </details>
           </section>
           <aside class="insight-panel">
-            <div class="panel-tabs"><button class="selected" data-tab="live">牌局动态</button><button data-tab="session">本场数据</button></div>
+            <div class="panel-tabs"><button class="selected" data-tab="live">牌局动态</button><button data-tab="session">本场数据</button><button id="chatTab" data-tab="chat" type="button" aria-controls="chatPanel" hidden>聊天 <b id="chatTabUnread" class="chat-unread" hidden></b></button></div>
             <div id="sideContent"></div>
           </aside>
         </div>
@@ -196,6 +210,6 @@
     <div id="modalBody"></div>
   </dialog>
   <div class="toast" id="toast" role="status"></div>
-  <script type="module" src="app.js?v=42"></script>
+  <script type="module" src="app.js?v=44"></script>
 </body>
 </html>
