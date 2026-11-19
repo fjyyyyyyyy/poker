@@ -16,6 +16,7 @@
  * 环境变量：
  *   PORT=8787                 本地端口
  *   CLOUDFLARED=/path/to/bin  指定 cloudflared 可执行文件
+ *   SHARE_TIMEOUT_MS=180000  等待公网地址的最长时间
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { dirname } from 'node:path';
@@ -27,6 +28,7 @@ const OPEN = !process.argv.includes('--no-open');
 const LOCAL = `http://127.0.0.1:${PORT}`;
 const INFO = `${LOCAL}/api/server-info`;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const WAIT_MS = Number(process.env.SHARE_TIMEOUT_MS) || 180000;
 
 let serverChild = null;
 let tunnelChild = null;
@@ -191,6 +193,7 @@ async function main() {
   }
 
   console.log('  正在向 Cloudflare 申请公网地址…');
+  console.log('  首次运行需要下载 cloudflared/建立隧道，通常 20–90 秒，请耐心等待。');
   tunnelChild = spawn(tunnel.command, tunnel.args, {
     cwd: ROOT,
     env: process.env,
@@ -211,6 +214,7 @@ async function main() {
 
   let output = '';
   let announced = false;
+  let progress = null;
   const collect = chunk => {
     const text = chunk.toString();
     output = (output + text).slice(-8192);
@@ -219,6 +223,7 @@ async function main() {
     const match = output.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/i);
     if (!match) return;
     announced = true;
+    clearInterval(progress);
     console.log('');
     console.log('  ────────────────────────────────────────────');
     console.log('  公网地址：' + match[0]);
@@ -236,13 +241,18 @@ async function main() {
   tunnelChild.stdout.on('data', collect);
   tunnelChild.stderr.on('data', collect);
 
-  setTimeout(() => {
+  progress = setInterval(() => {
     if (announced || closing) return;
-    console.error('\n  等了 60 秒还没拿到公网地址，可能是网络无法连接 Cloudflare。');
+    console.log('  仍在等待公网地址…（首次下载 cloudflared 时可能需要 1–3 分钟）');
+  }, 15000);
+  setTimeout(() => {
+    clearInterval(progress);
+    if (announced || closing) return;
+    console.error(`\n  等了 ${Math.round(WAIT_MS / 1000)} 秒还没拿到公网地址，可能是网络无法连接 Cloudflare。`);
     if (tunnelTail) console.error(tunnelTail.split('\n').slice(-8).map(line => '    ' + line).join('\n'));
-    console.error('  如果所在网络访问 Cloudflare 不稳定，建议改用云服务器部署（见 README）。');
+    console.error('  可以试着重跑一次；仍失败就安装 cloudflared，或改用云服务器部署（见 README）。');
     shutdown(1);
-  }, 60000);
+  }, WAIT_MS);
 }
 
 main().catch(error => {
