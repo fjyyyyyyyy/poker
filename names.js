@@ -1,0 +1,2 @@
+export const AI_NAMES=['南乔','苏禾','陈墨','江野','陆川','程远','顾宁','许舟','沈星','林夏','白露','周屿','温言','方圆','唐梨','叶青','闻溪','宋安','秦越','向晚','季风','乔木','夏眠','池雨','岑远','陆遥','陈序','洛宁','云舟','阿泽','阿柚','小满','七七','安可','可乐','北辰','Noah','Iris','Alex','Luna','Max','June','Kai','Robin','Blair','Jade','Theo','Ruby'];
+export function pickNames(random,exclude=[],count=6){const a=AI_NAMES.filter(n=>!exclude.includes(n));for(let i=a.length-1;i>0;i--){const j=Math.floor(random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a.slice(0,count);}
