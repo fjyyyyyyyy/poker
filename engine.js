@@ -2,6 +2,7 @@ import { evaluate, shuffledDeck, secureRandom } from './evaluator.js';
 import {pickNames} from './names.js';
 import {newPersonality} from './personality.js';
 import {BET_UNIT,ceilBet,isBet} from './bet.js';
+import {observeHumanAction} from './opponent-profile.js';
 export const STREETS=['preflop','flop','turn','river'];
 export const STREET_NAMES={preflop:'翻牌前',flop:'翻牌',turn:'转牌',river:'河牌'};
 export const MIN_SEATS=2,DEFAULT_SEATS=6,MAX_SEATS=9;
@@ -13,6 +14,7 @@ export const TURN_LIMIT_MS=30000;
 export const FORCE_REPAY_AT=3500;
 export const AI_LEVELS=Object.freeze(['easy','normal','hard']);
 export const DEFAULT_AI_LEVEL='normal';
+const copyGameData=value=>typeof structuredClone==='function'?structuredClone(value):JSON.parse(JSON.stringify(value));
 export const PERSONAS=[
  {name:'你',en:'YOU',style:'观察 · 思考 · 决策',color:'#d8bb7b'},
  {name:'林澈',en:'THE ANALYST',style:'紧凶 · 沉着的分析师',color:'#8bb8ab',loose:.27,aggression:.66,bluff:.15,trap:.15,adapt:.8,bio:'耐心筛选起手牌，喜欢用位置施压。会留意你的弃牌频率，也会用强牌设下埋伏。'},
@@ -24,6 +26,10 @@ export const PERSONAS=[
  {color:'#cda38f'},
  {color:'#9fa77b'}
 ];
+function makePlayer(id,name,stack,isHuman=false,vacant=false){
+ return {id,isHuman,vacant,name,stack,debt:0,pendingLoan:0,net:0,loans:[],hole:[],
+  folded:vacant,bet:0,total:0,lastAction:'',stats:{hands:0,vpip:0,pfr:0,raises:0,calls:0,folds:0,faced:0,foldToBet:0,showdowns:0,shownBluffs:0}};
+}
 export class Game {
  constructor({stack=2000,sb=10,bb=20,random=secureRandom,excludeNames=[],seatCount=DEFAULT_SEATS,aiLevel=DEFAULT_AI_LEVEL}={}) {
   if(!Number.isInteger(seatCount)||seatCount<MIN_SEATS||seatCount>MAX_SEATS)throw RangeError(`人数请选择 ${MIN_SEATS}–${MAX_SEATS} 人`);
@@ -41,7 +47,13 @@ export class Game {
   this.personalities=seats.map((_,id)=>newPersonality(id,random,stationSeats.has(id)?'station':null));this.sessionId=Math.floor(random()*4294967296);this.completedHands=0;this.net=0;
   this.sb=sb;this.bb=bb;this.buyin=stack;this.betUnit=BET_UNIT;this.random=random;this.button=-1;this.hand=0;this.phase='idle';this.board=[];this.events=[];this.history=[];this.pot=0;this.actor=null;
   const names=pickNames(random,excludeNames,seatCount);
-  this.players=seats.map((_,id)=>({id,isHuman:id===0,name:id?names[id]:"你",stack,debt:0,pendingLoan:0,net:0,loans:[],hole:[],folded:false,bet:0,total:0,lastAction:'',stats:{hands:0,vpip:0,pfr:0,raises:0,calls:0,folds:0,faced:0,foldToBet:0,showdowns:0,shownBluffs:0}}));
+  this.players=seats.map((_,id)=>makePlayer(id,id?names[id]:'你',stack,id===0));
+ }
+ replaceSeat(id,{name,vacant=false,human=false}={}){
+  const used=this.players.map(p=>p.name);
+  const incoming=vacant?'空位':name||pickNames(this.random,used,1)[0];
+  this.players[id]=makePlayer(id,incoming,vacant?0:this.buyin,human,vacant);
+  this.personalities[id]=newPersonality(id,this.random);
  }
  nextSeat(from,predicate) {const count=this.players.length;for(let n=1;n<=count;n++){const i=(from+n)%count;if(predicate(this.players[i]))return i;}return null;}
  active(){return this.players.filter(p=>!p.folded);}
@@ -52,12 +64,14 @@ export class Game {
   // Chip race any legacy 5-chip residue into 10-chip units before the hand.
   let odd=0;this.players.forEach(p=>{const residue=p.stack%BET_UNIT;if(residue){odd+=residue;p.stack-=residue;}});
   const count=this.players.length;
-  for(let i=0;odd>=BET_UNIT;i++){this.players[(this.button+1+i)%count].stack+=BET_UNIT;odd-=BET_UNIT;}
-  if(odd>0)this.players[0].stack+=odd;
+  const occupied=this.players.filter(p=>!p.vacant).sort((a,b)=>
+   ((a.id-this.button-1+count)%count)-((b.id-this.button-1+count)%count));
+  for(let i=0;odd>=BET_UNIT;i++){occupied[i%occupied.length].stack+=BET_UNIT;odd-=BET_UNIT;}
+  if(odd>0)(this.players[0].vacant?occupied[0]:this.players[0]).stack+=odd;
   if(this.players.filter(p=>p.stack>0).length<2)throw Error('Need two funded players');
-  this.hand++;this.board=[];this.deck=shuffledDeck(this.random);this.pot=0;this.currentBet=this.bb;this.minRaise=this.bb;this.events=[];this.result=null;this.street='preflop';this.phase='playing';
+  this.hand++;this.actionCount=0;this.board=[];this.deck=shuffledDeck(this.random);this.pot=0;this.currentBet=this.bb;this.minRaise=this.bb;this.events=[];this.result=null;this.street='preflop';this.phase='playing';
   this.button=this.nextSeat(this.button,p=>p.stack>0);
-  this.players.forEach(p=>{p.folded=p.stack===0;p.bet=0;p.total=0;p.hole=[];p.lastAction='';p.actedAt=null;p.vpip=false;p.pfr=false;p.startStack=p.stack;if(p.stack>0)p.stats.hands++;});
+  this.players.forEach(p=>{p.folded=p.stack===0;p.bet=0;p.total=0;p.hole=[];p.lastAction='';p.actedAt=null;p.vpip=false;p.pfr=false;p.startStack=p.stack;p.handHuman=p.isHuman;if(p.stack>0)p.stats.hands++;});
   const sbSeat=this.active().length===2?this.button:this.nextSeat(this.button,p=>!p.folded);
   const bbSeat=this.nextSeat(sbSeat,p=>!p.folded);this.sbSeat=sbSeat;this.bbSeat=bbSeat;
   for(let r=0;r<2;r++){let i=this.button;for(let k=0;k<this.active().length;k++){i=this.nextSeat(i,p=>!p.folded);this.players[i].hole.push(this.deck.pop());}}
@@ -77,7 +91,7 @@ export class Game {
   const canRaise=reopen&&p.stack>call&&max>this.currentBet&&this.contenders().some(q=>q.id!==id);
   return {call,canCheck:call===0,canRaise,min:canRaise?(max>=minFullRaise?minFullRaise:max):max,max,currentBet:this.currentBet,unit:BET_UNIT,maxIsAllIn:true};
  }
- act(id,type,to=0){
+ act(id,type,to=0,{automatic=false}={}){
   const l=this.legal(id);if(!l)throw Error('Not your turn');const p=this.players[id];const before=this.currentBet;let paid=0,fullRaise=false;
   if(!['fold','check','call','raise'].includes(type))throw Error('Invalid action');
   if(type==='check'&&!l.canCheck)throw Error('Cannot check');
@@ -88,6 +102,11 @@ export class Game {
    if(to!==p.bet+p.stack&&!isBet(to))throw Error(`下注必须是 ${BET_UNIT} 的倍数（全下除外）`);
    if(to<l.min||to>l.max||to<=this.currentBet)throw Error('加注金额不在允许范围内');
   }
+  if(p.isHuman&&!automatic){
+   p.handHuman=true;
+   observeHumanAction(p,this.street,type,l.call,this.pot,l.canRaise);
+  }
+  this.actionCount=(this.actionCount||0)+1;
   if(l.call>0)p.stats.faced++;
   if(type==='fold'){p.folded=true;p.stats.folds++;if(l.call)p.stats.foldToBet++;p.lastAction='弃牌';}
   if(type==='check')p.lastAction='过牌';
@@ -158,18 +177,19 @@ export class Game {
    for(const [id,value] of this.splitAward(amount,winners))awards[id]+=value;pots.push({amount,winners,refund:false});
   }
   const contestAwards=Array(count).fill(0);pots.filter(x=>!x.refund).forEach(pot=>{for(const [id,value] of this.splitAward(pot.amount,pot.winners))contestAwards[id]+=value;});
-  this.players.forEach(p=>{p.stack+=awards[p.id];if(showdown&&!p.folded){p.stats.showdowns++;const last=this.events.filter(e=>e.kind==='action'&&e.seat===p.id&&e.street==='river').at(-1);if(last?.type==='raise'&&evaluate([...p.hole,...this.board]).category===0)p.stats.shownBluffs++;}});
+  this.players.forEach(p=>{p.stack+=awards[p.id];if(showdown&&!p.folded){p.stats.showdowns++;const actions=this.events.filter(e=>e.kind==='action'&&e.seat===p.id&&e.street==='river');if(actions[actions.length-1]?.type==='raise'&&evaluate([...p.hole,...this.board]).category===0)p.stats.shownBluffs++;}});
   this.result={showdown,awards,contestAwards,pots,winningSeats:contestAwards.flatMap((x,i)=>x>0?[i]:[]),total:this.pot,revealed:showdown?alive.map(p=>({id:p.id,hole:[...p.hole],hand:evaluate([...p.hole,...this.board]).name})):[],heroDelta:this.players[0].stack-this.players[0].startStack};
   this.players.forEach(p=>p.net=(p.net||0)+p.stack-p.startStack);
   this.completedHands++;this.net+=this.result.heroDelta;
   this.phase='complete';this.actor=null;
-  this.history.unshift({hand:this.hand,board:[...this.board],heroCards:[...this.players[0].hole],privateHands:this.players.map(p=>[...p.hole]),deltas:this.players.map(p=>p.stack-p.startStack),names:this.players.map(p=>p.name),events:structuredClone(this.events),result:structuredClone(this.result),stacks:this.players.map(p=>p.stack)});this.history=this.history.slice(0,100);
+  this.history.unshift({hand:this.hand,at:Date.now(),board:[...this.board],heroCards:[...this.players[0].hole],privateHands:this.players.map(p=>[...p.hole]),deltas:this.players.map(p=>p.stack-p.startStack),names:this.players.map(p=>p.name),events:copyGameData(this.events),result:copyGameData(this.result),stacks:this.players.map(p=>p.stack),
+   participants:this.players.filter(p=>p.hole.length===2).map(p=>({seat:p.id,name:p.name,human:!!p.handHuman,folded:p.folded,stack:p.stack,contributed:p.total}))});this.history=this.history.slice(0,100);
   // 高于 3,500 的部分自动还债（真人/AI 都适用）
   this.forceRepay();
  }
  publicView(id){
   // Deliberate allowlist: never serialize deck, opponent hole cards, burns, or private decisions.
-  return {sessionId:this.sessionId,hand:this.hand,seat:id,aiLevel:this.aiLevel,personality:structuredClone(this.personalities[id]),hole:[...this.players[id].hole],board:[...this.board],street:this.street,button:this.button,sbSeat:this.sbSeat,bbSeat:this.bbSeat,sb:this.sb,bb:this.bb,betUnit:this.betUnit,pot:this.pot,currentBet:this.currentBet,minRaise:this.minRaise,legal:this.legal(id),players:this.players.map(p=>({id:p.id,name:p.name,stack:p.stack,bet:p.bet,total:p.total,folded:p.folded,stats:{...p.stats}})),events:structuredClone(this.events)};
+  return {sessionId:this.sessionId,hand:this.hand,seat:id,aiLevel:this.aiLevel,tableSize:this.players.filter(p=>p.hole.length===2).length,personality:copyGameData(this.personalities[id]),hole:[...this.players[id].hole],board:[...this.board],street:this.street,button:this.button,sbSeat:this.sbSeat,bbSeat:this.bbSeat,sb:this.sb,bb:this.bb,betUnit:this.betUnit,pot:this.pot,currentBet:this.currentBet,minRaise:this.minRaise,legal:this.legal(id),players:this.players.map(p=>({id:p.id,name:p.name,stack:p.stack,bet:p.bet,total:p.total,folded:p.folded,vacant:!p.hole.length,isHuman:p.isHuman,stats:{...p.stats},...(p.isHuman&&p.observations?{observations:copyGameData(p.observations)}:{})})),events:copyGameData(this.events)};
  }
  borrow(id){
   const p=this.players[id];if(!p)throw Error('玩家不存在');
@@ -201,6 +221,6 @@ export class Game {
   if(inHand&&Number.isFinite(p.startStack))p.startStack-=amount;
   p.loans.unshift({type:'repay',amount,hand:this.hand,time:Date.now()});p.loans=p.loans.slice(0,50);return amount;
  }
- refillBusted(humanSeats=[0]){if(!['complete','idle'].includes(this.phase))return;this.players.forEach(p=>{if(!humanSeats.includes(p.id)&&p.stack===0&&!p.pendingLoan&&this.borrowable(p.id)>0)this.borrow(p.id);});}
+ refillBusted(humanSeats=[0]){if(!['complete','idle'].includes(this.phase))return;this.players.forEach(p=>{if(!p.vacant&&!humanSeats.includes(p.id)&&p.stack===0&&!p.pendingLoan&&this.borrowable(p.id)>0)this.borrow(p.id);});}
 
 }

@@ -1,12 +1,13 @@
 {
   "name": "river-room",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "private": true,
   "type": "module",
   "description": "River Room 德州练习室：单人练习 + 联网联机房间",
   "scripts": {
     "start": "node server.mjs",
-    "share": "node share.mjs"
+    "share": "node share.mjs",
+    "test": "node --test"
   },
   "engines": {
     "node": ">=20"

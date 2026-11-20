@@ -1,11 +1,23 @@
 import {evaluate,rank,suit,secureRandom} from './evaluator.js';
 import {seededRandom,tableMood} from './personality.js';
 import {BET_UNIT,snapBet} from './bet.js';
+import {learnResponses,responseSpot} from './opponent-profile.js';
 const clamp=(x,a=0,b=1)=>Math.max(a,Math.min(b,x));
 const sigmoid=x=>1/(1+Math.exp(-x));
 const DECK=Array.from({length:52},(_,i)=>i);
 const seatOffset=(v,id)=>(id-v.button+v.players.length)%v.players.length;
-const latePosition=(v,id)=>seatOffset(v,id)===0||v.players.length>=5&&seatOffset(v,id)===v.players.length-1;
+const tableSize=v=>v.tableSize??v.players.length;
+const neutralResponse={fold:0,raise:0};
+const responseRead=(t,street,price)=>t.responses?.[responseSpot(street,price)]??neutralResponse;
+function latePosition(v,id){
+ if(id===v.button)return true;
+ if(tableSize(v)<5)return false;
+ const count=v.players.length,gap=(v.button-id+count)%count;
+ for(let step=1;step<gap;step++){
+  if(!v.players[(id+step)%count].vacant)return false;
+ }
+ return true;
+}
 export function preflopStrength(cards){
  const [a,b]=cards.map(rank).sort((x,y)=>y-x),pair=a===b,suited=suit(cards[0])===suit(cards[1]),gap=a-b;
  if(pair)return clamp(.46+(a-2)*.043,.1,.99);
@@ -34,10 +46,16 @@ function texture(cards,board){
 }
 function tendencies(player){
  const s=player.stats;
- const vpip=(s.vpip+8)/(s.hands+25),agg=(s.raises+4)/(s.raises+s.calls+8),fold=(s.foldToBet+6)/(s.faced+14),bluff=(s.shownBluffs+1)/(s.showdowns+10);
+ const responses=learnResponses(player);
+ const vpip=(s.vpip+8)/(s.hands+25),bluff=(s.shownBluffs+1)/(s.showdowns+10);
+ let agg=(s.raises+4)/(s.raises+s.calls+8),fold=(s.foldToBet+6)/(s.faced+14);
+ if(responses){
+  agg=.5+(agg-.5)*.4;
+  fold=.43+(fold-.43)*.25;
+ }
  // 入池宽、面对下注很少弃牌、几乎不加注 => 跟注站。用先验平滑，前几手不会误判。
  const sticky=clamp((vpip-.34)*1.7+(.43-fold)*1.5+(.5-agg)*.25,0,.68);
- return {vpip,agg,fold,bluff,sticky};
+ return {vpip,agg,fold,bluff,sticky,responses};
 }
 function availableCombos(v){
  const blocked=new Set([...v.hole,...v.board]),available=DECK.filter(c=>!blocked.has(c)),combos=[];
@@ -47,21 +65,21 @@ function availableCombos(v){
 function publicTexture(combo,street,board){
  return combo.textures[street]??=texture(combo.cards,board);
 }
-function actionLikelihood(v,tendency,late,{event,priorRaises},hand){
- const pre=event.street==='preflop',headsUp=v.players.length===2;
+function actionLikelihood(v,tendency,late,{event,priorRaises,read},hand){
+ const pre=event.street==='preflop',headsUp=tableSize(v)===2;
  const size=event.amount/Math.max(v.bb,event.pot-event.amount);
  const looseness=(tendency.vpip-.32)*.33+(late&&pre?.045:0);
  if(event.type==='raise'){
   const base=pre?(headsUp?.58:.7):.63;
-  const threshold=clamp(base-looseness+Math.min(3,priorRaises)*(pre?.104:.12)+Math.min(size,2)*.07,.41,.965);
+  const threshold=clamp(base-looseness+Math.min(3,priorRaises)*(pre?.104:.12)+Math.min(size,2)*.07-read.raise*.29,.38,.97);
   const value=sigmoid((hand.percentile-threshold)*16);
-  const bluff=(.023+tendency.agg*.045+hand.draw*.36+(hand.blocker?.016:0))/(1+priorRaises*.68);
+  const bluff=(.023+tendency.agg*.045+hand.draw*.36+(hand.blocker?.016:0)+Math.max(0,read.raise)*.18)/(1+priorRaises*.68);
   return .012+value*.76+(1-value)*bluff;
  }
  if(event.type==='call'){
   const threshold=pre?(headsUp?.31:.45):.27;
   const drawPotential=hand.draw*(event.street==='flop'?1.05:.68);
-  const strength=sigmoid((hand.percentile+drawPotential-threshold+looseness-Math.min(1.5,size)*.22-priorRaises*.046)*12);
+  const strength=sigmoid((hand.percentile+drawPotential-threshold+looseness-Math.min(1.5,size)*.22-priorRaises*.046-read.fold*.43)*12);
   return Math.min(.98,.08+strength*.72+(tendency.sticky??0)*.09);
  }
  return .79-hand.percentile*(pre?.31:.37);
@@ -76,20 +94,23 @@ function observedActions(v){
  }
  return actions;
 }
-function rangeFor(v,op,available,modelActions){
- const observations=(modelActions??observedActions(v)).filter(({event})=>event.seat===op.id);
- const tendency=tendencies(op),combos=[],late=latePosition(v,op.id);let total=0;
+function rangeFor(v,op,available,modelActions,tendency=tendencies(op)){
+ const observations=(modelActions??observedActions(v)).filter(({event})=>event.seat===op.id).map(entry=>{
+  const {event}=entry;
+  return {...entry,read:responseRead(tendency,event.street,(event.facing||0)/Math.max(v.bb,event.pot-event.amount))};
+ });
+ const combos=[],late=latePosition(v,op.id);let total=0;
  for(const combo of available){
   let weight=1;
   for(const entry of observations){
-   const e=entry.event,hand=publicTexture(combo,e.street,e.board);
+   const {event:e,read}=entry,hand=publicTexture(combo,e.street,e.board||[]);
    if(modelActions){weight*=actionLikelihood(v,tendency,late,entry,hand);continue;}
    const {power,draw,blocker}=hand,pre=e.street==='preflop';
    const threshold=pre?.76-tendency.vpip*.5-(late?.07:0):.56;
    const value=sigmoid((power-threshold)*11),bluff=(.035+tendency.agg*.1+draw*.65+(blocker?.05:0));
    let likelihood;
-   if(e.type==='raise'){const size=e.amount/Math.max(v.bb,e.pot-e.amount);likelihood=.025+value*(.55+Math.min(size,.8)*.2)+bluff*(1-value);}
-   else if(e.type==='call')likelihood=.04+sigmoid((power+draw-threshold+.13)*10)*(.86-.55*value);
+   if(e.type==='raise'){const size=e.amount/Math.max(v.bb,e.pot-e.amount),raisedValue=sigmoid((power-threshold+read.raise*.40)*11);likelihood=.025+raisedValue*(.55+Math.min(size,.8)*.2)+(bluff+Math.max(0,read.raise)*.13)*(1-raisedValue);}
+   else if(e.type==='call')likelihood=.04+sigmoid((power+draw-threshold+.13-read.fold*.4)*10)*(.86-.55*value);
    else likelihood=.2+(1-value)*.55+value*.1;
    weight*=clamp(likelihood,.015,.98);
   }
@@ -105,7 +126,7 @@ function drawRange(range,used,rng){
  }
  const legal=range.combos.filter(({combo})=>combo.cards.every(c=>!used.has(c)));
  let target=rng()*legal.reduce((sum,entry)=>sum+entry.weight,0);
- return legal.find(entry=>(target-=entry.weight)<=0)?.combo??legal.at(-1).combo;
+ return legal.find(entry=>(target-=entry.weight)<=0)?.combo??legal[legal.length-1].combo;
 }
 export function estimateEquity(v,{samples=180,rng=secureRandom}={}){
  const available=availableCombos(v),opponents=v.players.filter(p=>p.id!==v.seat&&!p.folded),ranges=opponents.map(p=>rangeFor(v,p,available));let wins=0;
@@ -114,7 +135,7 @@ export function estimateEquity(v,{samples=180,rng=secureRandom}={}){
   // Rotate sampling order to avoid always favoring the same opponent's conditional range.
   for(let j=0;j<ranges.length;j++){const k=(j+n)%ranges.length,{cards}=drawRange(ranges[k],used,rng);cards.forEach(c=>used.add(c));hands.push(cards);}
   const deck=DECK.filter(c=>!used.has(c)),board=[...v.board];
-  while(board.length<5){const k=Math.floor(rng()*deck.length);board.push(deck[k]);deck[k]=deck.at(-1);deck.pop();}
+  while(board.length<5){const k=Math.floor(rng()*deck.length);board.push(deck[k]);deck[k]=deck[deck.length-1];deck.pop();}
   const own=evaluate([...v.hole,...board]).score,others=hands.map(h=>evaluate([...h,...board]).score),best=Math.max(own,...others);
   if(own===best)wins+=1/(1+others.filter(s=>s===own).length);
  }
@@ -126,8 +147,12 @@ function standardDecision(v,{rng,samples,memory}){
  const tex=texture(v.hole,v.board),pre=v.street==='preflop',position=seatOffset(v,v.seat),late=latePosition(v,v.seat);
  const mood=tableMood(persona,v.events,v.seat);
  if(memory.hand!==v.hand||memory.sessionId!==v.sessionId){Object.keys(memory).forEach(k=>delete memory[k]);memory.hand=v.hand;memory.sessionId=v.sessionId;memory.plan=null;memory.actions=[];}
- const potOdds=l.call/(v.pot+l.call||1),facing=opps.filter(p=>p.bet===v.currentBet&&p.bet>0),opAgg=facing.reduce((a,p)=>a+tendencies(p).agg,0)/(facing.length||1);
- const foldRate=opps.reduce((a,p)=>a+tendencies(p).fold,0)/opps.length;
+ const potOdds=l.call/(v.pot+l.call||1),opponentReads=new Map(opps.map(p=>[p.id,tendencies(p)]));
+ const raises=v.events.filter(event=>event.kind==='action'&&event.type==='raise');
+ const streetRaises=raises.filter(event=>event.street===v.street),lastRaise=streetRaises[streetRaises.length-1];
+ const aggressor=lastRaise&&opponentReads.get(lastRaise.seat);
+ const opAgg=aggressor?clamp(aggressor.agg+responseRead(aggressor,v.street,(lastRaise.facing||0)/Math.max(v.bb,lastRaise.pot-lastRaise.amount)).raise*.85):.5;
+ const foldRate=opps.reduce((a,p)=>a+opponentReads.get(p.id).fold,0)/opps.length;
  const bluffCatch=(opAgg-.5)*persona.adapt*.09+mood.reactance*.12;
  // Select and remember an intent. A trap on a previous street can become a check-raise.
  const priorTrap=memory.plan==='trap';
@@ -155,15 +180,20 @@ function standardDecision(v,{rng,samples,memory}){
   const sizes=pre?[Math.round(v.bb*(late?2.4:2.7)),Math.round(v.currentBet*3.1)]:[Math.round(v.pot*.36),Math.round(v.pot*.72),Math.round(v.pot*1.1)];
   if(me.stack<=Math.max(v.pot*1.4,v.bb*12))sizes.push(l.max-me.bet);
   const totals=[...new Set(sizes.map(s=>clamp(pre?s:me.bet+l.call+s,l.min,l.max)).map(x=>x===l.max?l.max:Math.max(l.min,Math.min(l.max,snapBet(x)))))].filter(to=>to>v.currentBet&&(to===l.max||(to%BET_UNIT===0&&to>=l.min&&to<=l.max)));
-  const hasInitiative=v.events.filter(e=>e.kind==='action'&&e.type==='raise').at(-1)?.seat===v.seat;
+  const hasInitiative=raises[raises.length-1]?.seat===v.seat;
   const value=pre?tex.power>.78:eq>Math.max(.57,1/opps.length*.7);
   const bluffChance=persona.bluff*(late?1.18:.85)*(opps.length>2?.3:1)*(foldRate>.5?1.3:1)*(hasInitiative?1.25:1);
   const bluffIntent=!value&&(memory.plan==='semi-bluff'||memory.plan==='take-away'||rng()<bluffChance)&&(tex.draw>0||tex.blocker||hasInitiative||pre&&late||v.street==='river');
   const slowPlay=value&&memory.plan==='trap'&&opps.length<=2&&!(priorTrap&&l.call>0);
   for(const to of totals){
    const cost=to-me.bet,raiseExtra=to-v.currentBet,pressure=raiseExtra/Math.max(v.pot,v.bb);
-   let fe=opps.reduce((a,p)=>{const t=tendencies(p);return a*clamp(t.fold+pressure*.18+(pre?.08:0)-Math.max(0,p.bet/v.bb-2)*.015,.06,.86);},1);
-   fe=clamp(fe+(foldRate-.45)*persona.adapt*.12);
+   const fePot=Math.max(v.bb,v.pot+cost);
+   let fe=opps.reduce((a,p)=>{
+    if(!p.stack||to<=p.bet)return 0;
+    const t=opponentReads.get(p.id),price=Math.min(p.stack,to-p.bet)/fePot;
+    return a*clamp(t.fold+pressure*.18+(pre?.08:0)-Math.max(0,p.bet/v.bb-2)*.015+responseRead(t,v.street,price).fold*.85,.04,.91);
+   },1);
+   fe=clamp(fe*(1+(foldRate-.45)*persona.adapt*.25));
    const calledEq=clamp(realized-(1-realized)*(.16+pressure*.05));
    const effectiveCost=Math.min(cost,Math.max(...opps.map(p=>p.stack+p.bet))-me.bet);
    const ev=fe*v.pot+(1-fe)*(calledEq*(v.pot+effectiveCost*1.65)-effectiveCost);
@@ -238,17 +268,15 @@ function buildModel(v){
  publicBoards.delete(v.street);
  for(const [street,board] of publicBoards)rankCombos(available,street,board);
  const ranked=rankCombos(available,v.street,v.board);
- const opponents=v.players.filter(p=>p.id!==v.seat&&!p.folded).map(player=>({
-  player,
-  range:rangeFor(v,player,available,actions),
-  tendency:tendencies(player),
-  late:latePosition(v,player.id)
- }));
+ const opponents=v.players.filter(p=>p.id!==v.seat&&!p.folded).map(player=>{
+  const tendency=tendencies(player);
+  return {player,range:rangeFor(v,player,available,actions,tendency),tendency,late:latePosition(v,player.id)};
+ });
  return {
   v,
   opponents,
   hero:v.players[v.seat],
-  unbeatablyTied:v.board.length===5&&ranked[0].score===ranked.at(-1).score&&ranked[0].score===texture(v.hole,v.board).score
+  unbeatablyTied:v.board.length===5&&ranked[0].score===ranked[ranked.length-1].score&&ranked[0].score===texture(v.hole,v.board).score
  };
 }
 
@@ -279,7 +307,7 @@ function generateScenarios(model,samples,rng,rollout=false){
    while(board.length<5){
     const index=Math.floor(rng()*remaining.length);
     board.push(remaining[index]);
-    remaining[index]=remaining.at(-1);
+    remaining[index]=remaining[remaining.length-1];
     remaining.pop();
    }
   }
@@ -308,11 +336,12 @@ function continuationProbability(model,opponent,combo,cost,pot){
  const {draw,blocker,percentile}=combo.textures[v.street];
  const price=cost/(pot+cost),pre=v.street==='preflop';
  const multiway=opponents.length>1;
- const tightness=(tendency.fold-.43)*.56+(tendency.vpip-.32)*-.24-(tendency.sticky??0)*.44;
+ const pressure=cost/Math.max(v.bb,pot);
+ const read=responseRead(tendency,v.street,pressure);
+ const tightness=(tendency.fold-.43)*.56+(tendency.vpip-.32)*-.24-(tendency.sticky??0)*.44+read.fold*.83;
  const shortStack=player.stack<=cost*1.6?.07:0;
  const committed=player.bet>v.bb&&player.bet>=cost?.045:0;
  const position=opponent.late?.035:0;
- const pressure=cost/Math.max(v.bb,pot);
  const threshold=pre?.46+price*.86+(multiway?.03:-.08):.36+price*1.05+(multiway?.06:0);
  const potential=draw*(v.street==='flop'?1.06:.66)+(blocker?.025:0);
  const strength=percentile+potential+tendency.agg*.045+shortStack+committed+position;
@@ -502,8 +531,8 @@ function expertActions(model){
    const open=v.bb*(2.45+(!inPosition?.25:0)+limpers*(inPosition?.85:1.1));
    targets=[open,open+v.bb*.45];
   }else{
-   const aggressor=raises.at(-1).seat;
-   const callers=model.actions.slice(model.actions.lastIndexOf(raises.at(-1))+1).filter(e=>e.type==='call'&&e.amount).length;
+   const lastRaise=raises[raises.length-1],aggressor=lastRaise.seat;
+   const callers=model.actions.slice(model.actions.lastIndexOf(lastRaise)+1).filter(e=>e.type==='call'&&e.amount).length;
    const inPositionToRaiser=inPosition||aggressor===v.sbSeat||aggressor===v.bbSeat&&hero.id!==v.sbSeat;
    const multiplier=raises.length===1?(inPositionToRaiser?2.9:3.7):(inPositionToRaiser?2.15:2.55);
    targets=[v.currentBet*(multiplier+callers*.55)];
@@ -529,14 +558,15 @@ function pressureProbability(model,opponent,hand,pot,cost,reopens){
  const price=cost/Math.max(v.bb,pot+cost);
  let cutoff;
  if(cost){
-  cutoff=pre?(v.players.length===2?.865:.925):.91;
+  cutoff=pre?(tableSize(v)===2?.865:.925):.91;
   cutoff+=Math.min(3,raises.length+Number(reopens))*.052+price*.10+multiway*.013;
  }else{
-  cutoff=(pre?(v.players.length===2?.62:.77):.68)+multiway*.045-(late?.07:0);
+  cutoff=(pre?(tableSize(v)===2?.62:.77):.68)+multiway*.045-(late?.07:0);
  }
- const valueMix=sigmoid((strength-cutoff+(tendency.agg-.5)*.10)*22);
- const bluff=(.025+tendency.bluff*.34+(hand.blocker?.045:0)+hand.draw*.24)/(1+multiway+raises.length);
- return valueMix*(cost?.46:.70)+(1-valueMix)*bluff;
+ const read=responseRead(tendency,v.street,cost/Math.max(v.bb,pot));
+ const valueMix=sigmoid((strength-cutoff+(tendency.agg-.5)*.10+read.raise*.26)*22);
+ const bluff=(.025+tendency.bluff*.34+(hand.blocker?.045:0)+hand.draw*.24+Math.max(0,read.raise)*.23)/(1+multiway+raises.length);
+ return clamp(valueMix*(cost?.46:.70)*(1+read.raise*.75)+(1-valueMix)*bluff,0,.94);
 }
 
 function canHandlePressure(model,price,size,heroHand=model.own){
@@ -612,7 +642,8 @@ function expertPayoff(model,action,outcome){
    const price=Math.min(chips,snapBet(Math.max(v.bb,pot*.58)));
    if(price>0){
     const hand=nextHands[i+1]??=texture(hands[i].cards,nextBoard);
-    const lead=sigmoid((hand.power+hand.draw*.25-.65)*14)*(.47+op.tendency.agg*.28)+.03+op.tendency.bluff*.19;
+    const nextStreet=nextBoard.length===4?'turn':'river';
+    const lead=clamp(sigmoid((hand.power+hand.draw*.25-.65)*14)*(.47+op.tendency.agg*.28)+.03+op.tendency.bluff*.19+responseRead(op.tendency,nextStreet,0).raise*.48);
     if(nextRolls[i]<lead){
      const heroHand=nextHands[0]??=texture(v.hole,nextBoard);
      if(!canHandlePressure(model,price/(pot+price*2),price,heroHand))return -cost;
@@ -636,7 +667,7 @@ function expertAdjustment(model,action,equity){
   const playable=percentile+(suited?.025:0)+(suited&&a===14?.037:0)+(suited&&a-b<=1?.03:0);
   const looseness=(v.personality.loose-.35)*.20;
   if(!raises.length){
-   const headsUp=v.players.length===2;
+   const headsUp=tableSize(v)===2;
    let threshold=headsUp?.24:clamp(.37+playersBehind*.056,.42,.83);
    if(limpers)threshold=Math.max(.53,threshold)+Math.min(limpers,3)*.038;
    threshold-=looseness;
@@ -719,7 +750,7 @@ function hardDecision(v,{rng,samples}){
  const active=v.players.filter(player=>!player.folded).length;
  // A single response branch is informative in small pots with few active hands.
  // Use range EV with a realization discount where additional raises and side actions dominate.
- if(v.players.length>2&&(v.street==='preflop'||active>3))return wideRangeDecision(v,{rng,samples});
+ if(tableSize(v)>2&&(v.street==='preflop'||active>3))return wideRangeDecision(v,{rng,samples});
  const model=expertContext(buildModel(v));
  const scenarios=generateScenarios(model,samples,rng,true);
  const actions=expertActions(model);
@@ -757,7 +788,8 @@ function randomStream(){
 
 export function decide(v,{rng=randomStream(),samples,memory={}}={}){
  if(!v.legal)throw Error('Missing legal actions');
+ const active=v.players.filter(player=>!player.folded).length;
  if(v.aiLevel==='easy')return easyDecision(v,{rng,samples:samples??55});
- if(v.aiLevel==='hard')return hardDecision(v,{rng,samples:samples??340});
- return standardDecision(v,{rng,samples:samples??150,memory});
+ if(v.aiLevel==='hard')return hardDecision(v,{rng,samples:samples??(active>=6?220:active>=4?280:340)});
+ return standardDecision(v,{rng,samples:samples??(active>=6?120:150),memory});
 }

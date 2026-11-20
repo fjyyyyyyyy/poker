@@ -4,5 +4,8 @@ node_modules
 npm-debug.log*
 .DS_Store
 *.zip
+.data
+.leaderboard.json
+.rooms.json
 启动联机.app
 启动联机.command

@@ -2,3 +2,6 @@
 node_modules/
 *.log
 .env
+.data/
+.leaderboard.json
+.rooms.json
